@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Astroneers Mission Control</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/theme/dracula.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/mode/yaml/yaml.min.js"></script>
+
+    <style>
+    :root {
+        --space-dark: #0b0d17;
+        --space-purple: #3e1f47;
+        --neon-pink: #d53f8c;
+        --neon-blue: #00d2ff;
+        --glass: rgba(20, 20, 35, 0.7); /* Darker glass for better text contrast */
+        --text-inactive: rgba(255, 255, 255, 0.5); /* Semi-transparent white instead of gray */
+    }
+    body {
+        background-color: var(--space-dark);
+        background-image: 
+            radial-gradient(circle at 10% 20%, rgba(62, 31, 71, 0.6) 0%, transparent 40%),
+            radial-gradient(circle at 90% 80%, rgba(0, 210, 255, 0.2) 0%, transparent 40%);
+        color: #fff;
+        font-family: 'Roboto Mono', monospace;
+        min-height: 100vh;
+    }
+    h1, h2, h3, .brand { font-family: 'Orbitron', sans-serif; }
+    
+    .glass-panel {
+        background: var(--glass);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 15px;
+        box-shadow: 0 0 30px rgba(0,0,0,0.7);
+    }
+
+    /* --- TAB FIXES --- */
+    .nav-tabs .nav-link {
+        color: var(--text-inactive); /* Make inactive tabs readable */
+        font-weight: bold;
+        transition: 0.3s;
+    }
+    .nav-tabs .nav-link:hover {
+        color: #fff;
+        text-shadow: 0 0 5px rgba(255,255,255,0.5);
+    }
+    .nav-tabs .nav-link.active {
+        color: var(--neon-blue) !important;
+        background: transparent !important;
+        border-bottom: 2px solid var(--neon-blue);
+    }
+
+    /* --- INPUT FIXES --- */
+    .form-control, .form-select {
+        background: rgba(255, 255, 255, 0.1) !important; /* Lighter background */
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: #000000 !important; /* Force white text */
+    }
+    .form-control::placeholder {
+        color: rgba(255, 255, 255, 0.5); /* Make placeholder visible */
+    }
+    .form-control:focus, .form-select:focus {
+        background: rgba(255, 255, 255, 0.15) !important;
+        color: #fff;
+        border-color: var(--neon-blue);
+        box-shadow: 0 0 15px rgba(0, 210, 255, 0.3);
+    }
+    
+    /* CodeMirror Override */
+    .CodeMirror {
+        height: 600px;
+        border-radius: 0 0 10px 10px;
+        font-size: 14px;
+        border: 1px solid rgba(255,255,255,0.1);
+    }
+    .editor-header {
+        background: rgba(255, 255, 255, 0.05);
+        padding: 10px 20px;
+        border-radius: 10px 10px 0 0;
+        border: 1px solid rgba(255,255,255,0.1);
+        border-bottom: none;
+    }
+
+    .btn-space {
+        background: linear-gradient(90deg, #6a11cb 0%, #2575fc 100%);
+        border: none;
+        color: white;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: 0.3s;
+    }
+    .btn-space:hover {
+        transform: scale(1.02);
+        box-shadow: 0 0 25px rgba(37, 117, 252, 0.6);
+        color: #fff;
+    }
+    .btn-tensor {
+        background: transparent;
+        border: 1px solid #ff9f43;
+        color: #ff9f43;
+    }
+    .btn-tensor:hover {
+        background: #ff9f43;
+        color: #000;
+        box-shadow: 0 0 20px #ff9f43;
+    }
+</style>
+</head>
+<body class="p-4">
+
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="display-5 text-uppercase brand" style="color: var(--neon-blue);">
+                <span style="color: var(--neon-pink);">Astroneers</span> // Command Deck
+            </h1>
+            <small class="text-muted">AstroBOT Neural Configuration Interface</small>
+        </div>
+        <button onclick="launchTensorboard()" class="btn btn-tensor px-4 py-2">
+            📊 Launch TensorBoard
+        </button>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <div class="glass-panel p-4 h-100">
+                <h3 class="mb-4" style="color: var(--neon-pink);">Mission Control</h3>
+                
+                <ul class="nav nav-tabs border-0 mb-3" id="runTabs">
+                    <li class="nav-item">
+                        <button class="nav-link active bg-transparent text-light border-0" id="tab-new" onclick="setMode('new')">Create New</button>
+                    </li>
+                    <li class="nav-item">
+                        <button class="nav-link bg-transparent border-0" id="tab-resume" onclick="setMode('resume')">Resume Existing</button>
+                    </li>
+                    </ul>
+                <div id="controls-area">
+                    <div id="resume-group" class="mb-3" style="display:none;">
+                        <label class="form-label text-info">Select Existing Mission Log</label>
+                        <select id="existing-runs" class="form-select" onchange="updateRunId(this.value)">
+                            <option value="" disabled selected>-- Select Run ID --</option>
+                            {% for run in runs %}
+                            <option value="{{ run }}">{{ run }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="form-label text-info">Mission ID (Run ID)</label>
+                        <input type="text" id="run-id" class="form-control form-control-lg" placeholder="e.g. MoonRover_Alpha_01">
+                    </div>
+
+                    <div class="d-grid">
+                        <button onclick="startTraining()" class="btn btn-space py-3">
+                            🚀 Initiate Sequence
+                        </button>
+                    </div>
+                </div>
+
+                <hr class="border-secondary my-4">
+                <div class="alert alert-dark border-0 text-center" style="background: rgba(0,0,0,0.3);">
+                    <small>Status: <span id="status-text" class="text-success">System Online</span></small>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-8">
+            <div class="glass-panel">
+                <div class="editor-header d-flex justify-content-between align-items-center">
+                    <span class="text-white fw-bold">📝 moon_rover_config.yaml</span>
+                    <button onclick="saveYaml()" class="btn btn-sm btn-outline-light">💾 Save Config</button>
+                </div>
+                <textarea id="yaml-editor">{{ yaml_content }}</textarea>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 1. Initialize CodeMirror (The Text Editor)
+    var editor = CodeMirror.fromTextArea(document.getElementById("yaml-editor"), {
+        mode: "yaml",
+        theme: "dracula",
+        lineNumbers: true,
+        tabSize: 2,
+        lineWrapping: true
+    });
+
+    // 2. State Management
+    let currentMode = 'new';
+
+    function setMode(mode) {
+        currentMode = mode;
+        const resumeGroup = document.getElementById('resume-group');
+        const runInput = document.getElementById('run-id');
+        const tabNew = document.getElementById('tab-new');
+        const tabResume = document.getElementById('tab-resume');
+
+        if (mode === 'resume') {
+            resumeGroup.style.display = 'block';
+            tabResume.classList.replace('text-muted', 'text-light');
+            tabResume.classList.add('active');
+            tabNew.classList.replace('text-light', 'text-muted');
+            tabNew.classList.remove('active');
+            
+            // Auto-fill from dropdown if available
+            const dropdown = document.getElementById('existing-runs');
+            if(dropdown.value) runInput.value = dropdown.value;
+        } else {
+            resumeGroup.style.display = 'none';
+            runInput.value = '';
+            runInput.placeholder = "e.g. MoonRover_Alpha_01";
+            tabNew.classList.replace('text-muted', 'text-light');
+            tabNew.classList.add('active');
+            tabResume.classList.replace('text-light', 'text-muted');
+            tabResume.classList.remove('active');
+        }
+    }
+
+    function updateRunId(val) {
+        document.getElementById('run-id').value = val;
+    }
+
+    // 3. API Actions
+    function saveYaml() {
+        const content = editor.getValue();
+        fetch('/save_yaml', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'yaml_code=' + encodeURIComponent(content)
+        })
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('status-text').innerText = "Configuration Saved";
+            setTimeout(() => document.getElementById('status-text').innerText = "System Online", 2000);
+        });
+    }
+
+    function startTraining() {
+        const runId = document.getElementById('run-id').value;
+        if (!runId) {
+            alert("Please enter a Mission ID");
+            return;
+        }
+
+        fetch('/start_training', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: `run_id=${encodeURIComponent(runId)}&mode=${currentMode}`
+        })
+        .then(res => res.json())
+        .then(data => alert(data.message));
+    }
+
+    function launchTensorboard() {
+        fetch('/launch_tensorboard')
+        .then(res => res.json())
+        .then(data => alert("TensorBoard Launching in new window... Check http://localhost:6006"));
+    }
+</script>
+</body>
+</html>
