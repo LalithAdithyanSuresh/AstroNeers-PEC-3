@@ -1,0 +1,31 @@
+# --- Unity Folders ---
+/[Ll]ibrary/
+/[Tt]emp/
+/[Ll]ogs/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Vv]isualStudioProjectTemplates/
+/[Mm]emoryCaptures/
+/[Aa]ssets/AssetStoreTools*
+
+# --- Unity Generated Project Files ---
+*.csproj
+*.sln
+*.unitypackage
+*.userprefs
+
+# --- Python & Environment ---
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- AstroBOT Specifics ---
+# Ignore the ML results/training data but keep the code
+Python/results/
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
