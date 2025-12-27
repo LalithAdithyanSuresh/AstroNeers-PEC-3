@@ -7,22 +7,29 @@ using System.Linq;
 public class VoxelSlamMapper : MonoBehaviour
 {
     [Header("Debug Visualization")]
-    public bool showLidarGizmos = true;
+    public bool showLidarGizmos = false; // Default off for FPS
     public bool showTrajectory = true;
     public bool showCalculatedPath = true;
     public bool showExplorationTarget = true;
     public bool showLandmarks = true;
 
-    [Header("Mode Selection")]
-    public bool useRealGameObjects = true; 
+    [Header("Performance Mode")]
+    [Tooltip("If TRUE, system will auto-detect GPU capabilities on Start.")]
+    public bool autoDetectGPU = true;
+    
+    [Tooltip("CRITICAL: False = GPU Instancing (Fast). True = GameObjects (Slow).")]
+    public bool useRealGameObjects = false; 
+
+    [Tooltip("How many frames to wait between Lidar scans. Higher = Better FPS.")]
+    [Range(1, 10)] public int scanThrottleFrames = 3;
 
     [Header("3D Map Settings")]
     public float granularity = 0.5f; 
     public Material obstacleMaterial; 
     public Material visitedGroundMaterial; 
-    public Material landmarkMaterial; // Material for YOLO Landmarks
+    public Material landmarkMaterial; 
     
-    [Header("CPU Mode Settings")]
+    [Header("Fallback Settings")]
     public GameObject voxelPrefab; 
     
     [Header("Layer Settings")]
@@ -34,7 +41,7 @@ public class VoxelSlamMapper : MonoBehaviour
     public float verticalScanAngle = 15f; 
 
     [Header("Pathfinding")]
-    public int maxPathIterations = 2000; 
+    public int maxPathIterations = 500; // Reduced from 2000 for speed
     
     // --- SLAM DATA ---
     public Vector3 originPosition { get; private set; }
@@ -45,7 +52,7 @@ public class VoxelSlamMapper : MonoBehaviour
 
     private HashSet<Vector3Int> occupiedVoxels = new HashSet<Vector3Int>(); 
     private HashSet<Vector3Int> visitedGroundVoxels = new HashSet<Vector3Int>(); 
-    private HashSet<Vector3Int> landmarkVoxels = new HashSet<Vector3Int>(); // Store Landmarks
+    private HashSet<Vector3Int> landmarkVoxels = new HashSet<Vector3Int>(); 
     
     private List<Vector3> trajectory = new List<Vector3>();
     private List<Vector3> keyLocations = new List<Vector3>(); 
@@ -77,8 +84,26 @@ public class VoxelSlamMapper : MonoBehaviour
         public List<Vector3> obstacles;
         public List<Vector3> safeGround;
         public List<Vector3> keyLocations;
-        public List<Vector3> landmarks; // Added export support
+        public List<Vector3> landmarks;
         public float finalScore;
+    }
+
+    void Awake()
+    {
+        if (autoDetectGPU)
+        {
+            // Check for GPU Instancing Support
+            if (SystemInfo.supportsInstancing)
+            {
+                useRealGameObjects = false;
+                Debug.Log($"<color=green>[VoxelSlam] GPU Instancing Supported. Switched to GPU Mode.</color>");
+            }
+            else
+            {
+                useRealGameObjects = true;
+                Debug.LogWarning($"<color=orange>[VoxelSlam] GPU Instancing NOT Supported. Falling back to CPU GameObjects.</color>");
+            }
+        }
     }
 
     void Start()
@@ -90,6 +115,7 @@ public class VoxelSlamMapper : MonoBehaviour
         cubeMesh = temp.GetComponent<MeshFilter>().sharedMesh;
         Destroy(temp);
 
+        // Ensure materials support instancing
         if (obstacleMaterial) obstacleMaterial.enableInstancing = true;
         if (visitedGroundMaterial) visitedGroundMaterial.enableInstancing = true;
         if (landmarkMaterial) landmarkMaterial.enableInstancing = true;
@@ -106,12 +132,17 @@ public class VoxelSlamMapper : MonoBehaviour
 
     void FixedUpdate()
     {
-        Perform3DLidarScan();
-        UpdateTrajectory();
+        // PERFORMANCE: Only scan every N frames
+        if (Time.frameCount % scanThrottleFrames == 0)
+        {
+            Perform3DLidarScan();
+            UpdateTrajectory();
+        }
     }
 
     void Update()
     {
+        // GPU Rendering happens every frame for smoothness, but logic is throttled
         if (!useRealGameObjects)
         {
             RenderGPU(obstacleBatches, currentObstacleBatch, obstacleMaterial);
@@ -136,7 +167,6 @@ public class VoxelSlamMapper : MonoBehaviour
         keyLocations.Clear();
         currentCalculatedPath.Clear();
 
-        // Reset Heuristic
         maxDistanceFromOrigin = 0f;
         furthestVoxel = Vector3Int.zero;
 
@@ -158,10 +188,8 @@ public class VoxelSlamMapper : MonoBehaviour
         keyLocations.Add(pos);
     }
 
-    // --- YOLO INTERFACE ---
     public void RegisterLandmark(Vector3 pos, string label)
     {
-        // Snap to grid
         int x = Mathf.FloorToInt(pos.x / granularity);
         int y = Mathf.FloorToInt(pos.y / granularity);
         int z = Mathf.FloorToInt(pos.z / granularity);
@@ -172,7 +200,7 @@ public class VoxelSlamMapper : MonoBehaviour
             landmarkVoxels.Add(coord);
             Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
 
-            if (useRealGameObjects) SpawnBlock(centerPos, 2); // 2 = Landmark
+            if (useRealGameObjects) SpawnBlock(centerPos, 2);
             else AddToRenderBatch(Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity), currentLandmarkBatch, landmarkBatches);
         }
     }
@@ -187,6 +215,9 @@ public class VoxelSlamMapper : MonoBehaviour
 
     public void ScanTerrainSurface(Terrain terrain)
     {
+        // PERFORMANCE: Throttled to match Lidar
+        if (Time.frameCount % scanThrottleFrames != 0) return;
+
         if (terrain == null) return;
         int radiusSteps = 2; 
         float checkStep = granularity;
@@ -208,15 +239,15 @@ public class VoxelSlamMapper : MonoBehaviour
     }
 
     // ==================================================================================
-    // PATHFINDING (A*) & EXPLORATION HEURISTIC
+    // PATHFINDING
     // ==================================================================================
 
     public Vector3 GetNextPathPoint(Vector3 currentPos)
     {
         if (currentCalculatedPath == null || currentCalculatedPath.Count == 0) return Vector3.zero;
 
-        // Consume path points as we get close to them
-        while(currentCalculatedPath.Count > 0 && Vector3.Distance(currentPos, currentCalculatedPath[0]) < 2.5f)
+        // Optimized cleanup using SqrMagnitude
+        while(currentCalculatedPath.Count > 0 && (currentPos - currentCalculatedPath[0]).sqrMagnitude < 6.25f) // 2.5*2.5
         {
             currentCalculatedPath.RemoveAt(0);
         }
@@ -225,21 +256,13 @@ public class VoxelSlamMapper : MonoBehaviour
         return Vector3.zero;
     }
 
-    /// <summary>
-    /// Calculates a path to the FURTHEST KNOWN SAFE POINT from the origin.
-    /// </summary>
     public void RecalculateExplorationPath(Vector3 startPos)
     {
-        if (visitedGroundVoxels.Count == 0) return;
-        if (furthestVoxel == Vector3Int.zero) return;
-
+        if (visitedGroundVoxels.Count == 0 || furthestVoxel == Vector3Int.zero) return;
         Vector3 targetPos = GridToWorld(furthestVoxel);
         currentCalculatedPath = FindPathAStar(startPos, targetPos);
     }
 
-    /// <summary>
-    /// Standard A* Pathfinding to a specific target
-    /// </summary>
     public void RecalculatePath(Vector3 startPos, Vector3 targetPos)
     {
         currentCalculatedPath = FindPathAStar(startPos, targetPos);
@@ -250,17 +273,15 @@ public class VoxelSlamMapper : MonoBehaviour
         Vector3Int startNode = WorldToGrid(start);
         Vector3Int targetNode = WorldToGrid(end);
 
-        // If start/end aren't perfectly on visited nodes, find the closest valid ones
         if (!visitedGroundVoxels.Contains(startNode)) startNode = FindClosestVisited(startNode);
         if (!visitedGroundVoxels.Contains(targetNode)) targetNode = FindClosestVisited(targetNode);
         
         if (startNode == targetNode) return new List<Vector3>();
 
-        // A* Setup
         HashSet<Vector3Int> closedSet = new HashSet<Vector3Int>();
         Dictionary<Vector3Int, Vector3Int> cameFrom = new Dictionary<Vector3Int, Vector3Int>();
         Dictionary<Vector3Int, float> gScore = new Dictionary<Vector3Int, float>();
-        List<Vector3Int> openSet = new List<Vector3Int>();
+        List<Vector3Int> openSet = new List<Vector3Int>(); // Consider PriorityQueue for bigger maps
         
         openSet.Add(startNode);
         gScore[startNode] = 0;
@@ -272,29 +293,29 @@ public class VoxelSlamMapper : MonoBehaviour
 
         while (openSet.Count > 0)
         {
-            if (iterations++ > maxPathIterations) break;
+            if (iterations++ > maxPathIterations) break; // Hard limit for FPS protection
 
-            // Get node with lowest F score
+            // Optimized sort: Only sorting the small OpenSet is okay, but could be better
+            openSet.Sort((a, b) => {
+                float fa = fScore.ContainsKey(a) ? fScore[a] : float.MaxValue;
+                float fb = fScore.ContainsKey(b) ? fScore[b] : float.MaxValue;
+                return fa.CompareTo(fb);
+            });
+
             Vector3Int current = openSet[0];
-            float lowestF = fScore.ContainsKey(current) ? fScore[current] : float.MaxValue;
-            for (int i = 1; i < openSet.Count; i++)
-            {
-                float f = fScore.ContainsKey(openSet[i]) ? fScore[openSet[i]] : float.MaxValue;
-                if (f < lowestF) { current = openSet[i]; lowestF = f; }
-            }
-
+            
             if (current == targetNode) return ReconstructPath(cameFrom, current);
 
-            openSet.Remove(current);
+            openSet.RemoveAt(0);
             closedSet.Add(current);
 
             foreach (Vector3Int neighbor in GetNeighbors(current))
             {
                 if (closedSet.Contains(neighbor)) continue;
-                if (occupiedVoxels.Contains(neighbor)) continue; // Avoid obstacles
-                if (!visitedGroundVoxels.Contains(neighbor)) continue; // Only walk on visited ground
+                if (occupiedVoxels.Contains(neighbor)) continue; 
+                if (!visitedGroundVoxels.Contains(neighbor)) continue; 
 
-                float tentativeG = gScore[current] + Vector3.Distance(GridToWorld(current), GridToWorld(neighbor));
+                float tentativeG = gScore[current] + 1.0f; 
 
                 if (!openSet.Contains(neighbor)) openSet.Add(neighbor);
                 else if (tentativeG >= (gScore.ContainsKey(neighbor) ? gScore[neighbor] : float.MaxValue)) continue;
@@ -323,21 +344,16 @@ public class VoxelSlamMapper : MonoBehaviour
 
     private IEnumerable<Vector3Int> GetNeighbors(Vector3Int center)
     {
-        for (int x = -1; x <= 1; x++)
-        {
-            for (int z = -1; z <= 1; z++)
-            {
-                if (x == 0 && z == 0) continue;
-                for (int y = -1; y <= 1; y++) // Small vertical steps allowed
-                    yield return center + new Vector3Int(x, y, z);
-            }
-        }
+        yield return center + new Vector3Int(1, 0, 0);
+        yield return center + new Vector3Int(-1, 0, 0);
+        yield return center + new Vector3Int(0, 0, 1);
+        yield return center + new Vector3Int(0, 0, -1);
     }
 
     private Vector3Int FindClosestVisited(Vector3Int p)
     {
         if (visitedGroundVoxels.Count == 0) return p;
-        for(int r=1; r<5; r++) {
+        for(int r=1; r<4; r++) {
             for(int x=-r; x<=r; x++) for(int y=-r; y<=r; y++) for(int z=-r; z<=r; z++) {
                 Vector3Int n = p + new Vector3Int(x,y,z);
                 if(visitedGroundVoxels.Contains(n)) return n;
@@ -370,6 +386,7 @@ public class VoxelSlamMapper : MonoBehaviour
             if (!sensorObj) continue;
             Vector3 origin = sensorObj.transform.position;
             Quaternion rot = sensorObj.transform.rotation;
+            
             for (int v = 0; v < vRays; v++)
             {
                 float vAngle = -vAngleTotal + (v * vStep);
@@ -402,11 +419,18 @@ public class VoxelSlamMapper : MonoBehaviour
             targetSet.Add(coord);
             Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
 
-            if (useRealGameObjects) SpawnBlock(centerPos, isObstacle ? 1 : 0);
-            else AddToRenderBatch(Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity), isObstacle ? currentObstacleBatch : currentGroundBatch, isObstacle ? obstacleBatches : groundBatches);
+            if (useRealGameObjects) 
+            {
+                SpawnBlock(centerPos, isObstacle ? 1 : 0);
+            }
+            else 
+            {
+                // GPU INSTANCING
+                Matrix4x4 mat = Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity);
+                if (isObstacle) AddToRenderBatch(mat, currentObstacleBatch, obstacleBatches);
+                else AddToRenderBatch(mat, currentGroundBatch, groundBatches);
+            }
         
-            // --- EXPLORATION HEURISTIC UPDATE ---
-            // If this is new Safe Ground, check if it's the furthest from home
             if (!isObstacle)
             {
                 float distSq = (pos - originPosition).sqrMagnitude;
@@ -482,19 +506,6 @@ public class VoxelSlamMapper : MonoBehaviour
         {
             Gizmos.color = Color.red;
             Gizmos.DrawWireSphere(GridToWorld(furthestVoxel), 1.0f);
-        }
-        
-        // Show Origin
-        Gizmos.color = Color.blue;
-        Gizmos.DrawSphere(originPosition, 0.5f);
-    }
-
-    private void OnDrawGizmosSelected()
-    {
-        if (showTrajectory && trajectory.Count > 1)
-        {
-            Gizmos.color = Color.yellow;
-            for(int i=0; i<trajectory.Count-1; i++) Gizmos.DrawLine(trajectory[i], trajectory[i+1]);
         }
     }
 }

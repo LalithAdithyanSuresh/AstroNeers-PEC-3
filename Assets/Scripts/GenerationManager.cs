@@ -34,13 +34,15 @@ public class GenerationManager : MonoBehaviour
 
     // Advanced Diagnostics
     private float fps = 0;
-    private float lastFrameTime;
     private float maxHitchDetected = 0;
     private float hitchTimer = 0;
+    private bool isGpuMode = false;
 
     void Start()
     {
         RefreshAgentList();
+        // Check GPU Instancing support globally
+        isGpuMode = SystemInfo.supportsInstancing;
     }
 
     void Update()
@@ -69,13 +71,11 @@ public class GenerationManager : MonoBehaviour
             leaderboardTimer = 0;
         }
         
-        // Sync RTH State
         UpdateReturnToHomeState();
     }
     
     private void UpdateReturnToHomeState()
     {
-        // Propagate the RTH toggle to all agents
         foreach(var agent in agents)
         {
             if (agent != null && agent.returnToHomeMode != forceReturnToHome)
@@ -120,7 +120,7 @@ public class GenerationManager : MonoBehaviour
     {
         generationCount++;
         timer = 0;
-        forceReturnToHome = false; // Reset RTH on new generation
+        forceReturnToHome = false;
 
         bool shouldRegenTerrain = !randomizeTerrainOnlyOnSuccess || pendingTerrainReset;
 
@@ -163,42 +163,43 @@ public class GenerationManager : MonoBehaviour
 
     void OnGUI()
     {
-        GUI.Box(new Rect(10, 10, 300, 300), "<b>ASTROBOT COMMAND</b>");
+        GUI.Box(new Rect(10, 10, 300, 320), "<b>ASTROBOT COMMAND</b>");
         
-        // FPS Meter
         GUIStyle style = new GUIStyle(GUI.skin.label);
         style.normal.textColor = fps > 30 ? Color.green : Color.red;
         GUI.Label(new Rect(25, 35, 250, 20), $"FPS: {fps:F1}", style);
 
-        // HITCH ALERT
+        // MODE INDICATOR
+        GUIStyle modeStyle = new GUIStyle(GUI.skin.label);
+        modeStyle.normal.textColor = isGpuMode ? Color.cyan : Color.yellow;
+        string modeText = isGpuMode ? "GPU MODE (Instancing)" : "CPU MODE (GameObjects)";
+        GUI.Label(new Rect(120, 35, 180, 20), modeText, modeStyle);
+
         if (hitchTimer > 0)
         {
             GUIStyle hitchStyle = new GUIStyle(GUI.skin.label);
             hitchStyle.normal.textColor = Color.red;
             hitchStyle.fontStyle = FontStyle.Bold;
-            GUI.Label(new Rect(120, 35, 200, 20), $"[ ! ] LAG SPIKE: {maxHitchDetected:F2}s", hitchStyle);
+            GUI.Label(new Rect(25, 55, 250, 20), $"[ ! ] LAG SPIKE: {maxHitchDetected:F2}s", hitchStyle);
         }
 
-        GUI.Label(new Rect(25, 60, 250, 20), $"Generation: {generationCount}");
-        GUI.Label(new Rect(25, 80, 250, 20), $"Next Reset: {(generationDuration - timer):F1}s");
-        GUI.Label(new Rect(25, 100, 250, 20), $"Best Score: {bestAllTimeScore:F0}");
+        GUI.Label(new Rect(25, 80, 250, 20), $"Generation: {generationCount}");
+        GUI.Label(new Rect(25, 100, 250, 20), $"Next Reset: {(generationDuration - timer):F1}s");
+        GUI.Label(new Rect(25, 120, 250, 20), $"Best Score: {bestAllTimeScore:F0}");
         
         if (currentLeader != null)
-            GUI.Label(new Rect(25, 125, 250, 20), $"Leader: <color=yellow>{currentLeader.name}</color> ({currentLeader.GetCurrentCheckpoint()} CP)");
+            GUI.Label(new Rect(25, 145, 250, 20), $"Leader: <color=yellow>{currentLeader.name}</color> ({currentLeader.GetCurrentCheckpoint()} CP)");
 
-        // Map status
         string status = (randomizeTerrainOnlyOnSuccess && !pendingTerrainReset) ? "LOCKED" : "READY";
-        GUI.Label(new Rect(25, 150, 250, 20), $"Terrain Mode: {status}");
+        GUI.Label(new Rect(25, 170, 250, 20), $"Terrain Mode: {status}");
 
-        if (GUI.Button(new Rect(25, 180, 120, 25), "FORCE RESET")) StartNewGeneration();
-        if (GUI.Button(new Rect(155, 180, 120, 25), "RE-CACHE")) RefreshAgentList();
+        if (GUI.Button(new Rect(25, 200, 120, 25), "FORCE RESET")) StartNewGeneration();
+        if (GUI.Button(new Rect(155, 200, 120, 25), "RE-CACHE")) RefreshAgentList();
         
-        // --- NEW RETURN TO HOME TOGGLE ---
-        forceReturnToHome = GUI.Toggle(new Rect(25, 215, 250, 25), forceReturnToHome, " ENABLE RETURN TO HOME");
+        forceReturnToHome = GUI.Toggle(new Rect(25, 235, 250, 25), forceReturnToHome, " ENABLE RETURN TO HOME");
         
-        // --- EXPORT BUTTON ---
         GUI.color = Color.cyan;
-        if (GUI.Button(new Rect(25, 250, 250, 30), "EXPORT BEST SLAM MAP"))
+        if (GUI.Button(new Rect(25, 270, 250, 30), "EXPORT BEST SLAM MAP"))
         {
             ExportBestRoverMap();
         }

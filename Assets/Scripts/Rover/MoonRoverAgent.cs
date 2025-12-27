@@ -21,25 +21,25 @@ public class MoonRoverAgent : Agent
     public TerrainGenerator moonTerrain;
     public float checkpointProximity = 5f;
     public int episodeStepLimit = 5000; 
-    public bool returnToHomeMode = false; // Flag to override ML logic
+    public bool returnToHomeMode = false;
 
     [Header("3. Telemetry & Sensors")]
     public List<GameObject> cameraSensors;
     public List<GameObject> lidarSensors;
     public LayerMask sensorVisibilityMask;
     
-    // New YOLO Reference
     public YoloLandmarkDetector yoloDetector;
 
     [Header("4. LiDAR Settings")]
     public float lidarRayLength = 50f;
     public float lidarRayDegrees = 90f;
-    public int lidarRaysPerDirection = 10;
+    [Tooltip("Reduced default for performance. 5 = 11 rays.")]
+    public int lidarRaysPerDirection = 5; 
     public float lidarVerticalDegrees = 30f;
-    public int lidarVerticalRaysPerDirection = 3;
+    public int lidarVerticalRaysPerDirection = 2;
     public float lidarSphereRadius = 0.2f;
 
-    [Header("5. Safety & Performance Settings")]
+    [Header("5. Safety & Performance")]
     public string obstacleTag = "Rocks";
     public float collisionPenalty = -10.0f;
     public float backtrackingPenalty = -0.05f; 
@@ -53,10 +53,8 @@ public class MoonRoverAgent : Agent
     private float currentPerformanceMetric = 0f;
     private GenerationManager manager;
     
-    // Reference to the SLAM Mapper
-    public VoxelSlamMapper slamMapper { get; private set; } // Public getter for Manager to access
+    public VoxelSlamMapper slamMapper { get; private set; } 
     
-    // Navigation Timer
     private float navTimer = 0;
     private Vector3 nextPathPoint = Vector3.zero;
 
@@ -66,10 +64,8 @@ public class MoonRoverAgent : Agent
         manager = FindObjectOfType<GenerationManager>();
         slamMapper = GetComponent<VoxelSlamMapper>();
         
-        // Auto-setup YOLO
         if (yoloDetector == null) yoloDetector = GetComponent<YoloLandmarkDetector>();
         
-        // FIX: Reference 'simCameras' instead of 'yoloCameras' to match the updated script
         if (yoloDetector != null && yoloDetector.simCameras.Count == 0) 
         {
             yoloDetector.AutoAssignCameras();
@@ -117,7 +113,6 @@ public class MoonRoverAgent : Agent
         transform.rotation = rot;
         currentWaypointIndex = 0;
         
-        // Reset Logic
         returnToHomeMode = false;
         
         if (moonTerrain && moonTerrain.ActiveCheckpoints.Count > 0)
@@ -139,8 +134,8 @@ public class MoonRoverAgent : Agent
     private void UpdateVisualPerformance()
     {
         if (bodyRenderer == null) return;
+        if (Time.frameCount % 5 != 0) return; // Optimization: Update visual less often
         
-        // Override color if returning home
         if (returnToHomeMode)
         {
             bodyRenderer.material.color = Color.magenta;
@@ -180,9 +175,8 @@ public class MoonRoverAgent : Agent
         rb.linearVelocity = Vector3.zero;
         rb.angularVelocity = Vector3.zero;
         currentWaypointIndex = 0;
-        returnToHomeMode = false; // Always reset this at start of episode
+        returnToHomeMode = false; 
 
-        // Reset the SLAM Map and Set LOCALIZED ORIGIN
         if (slamMapper != null)
         {
             slamMapper.SetOrigin(transform.position);
@@ -203,72 +197,59 @@ public class MoonRoverAgent : Agent
     {
         if (currentTarget == null) { sensor.AddObservation(new float[12 + 3]); return; } 
 
-        // Observations of State
         Vector3 vectorToTarget = currentTarget.position - transform.position;
         Vector3 localTarget = transform.InverseTransformDirection(vectorToTarget);
-        sensor.AddObservation(localTarget.normalized); // 3
-        sensor.AddObservation(Mathf.Clamp01(vectorToTarget.magnitude / 150f)); // 1
+        sensor.AddObservation(localTarget.normalized); 
+        sensor.AddObservation(Mathf.Clamp01(vectorToTarget.magnitude / 150f)); 
 
         Vector3 localVel = transform.InverseTransformDirection(rb.linearVelocity);
-        sensor.AddObservation(localVel / maxSpeed); // 3
-        sensor.AddObservation(rb.angularVelocity.y); // 1
+        sensor.AddObservation(localVel / maxSpeed); 
+        sensor.AddObservation(rb.angularVelocity.y); 
 
-        sensor.AddObservation(Vector3.Dot(transform.up, Vector3.up)); // 1
-        sensor.AddObservation(transform.InverseTransformDirection(transform.position - lastPosition)); // 3
+        sensor.AddObservation(Vector3.Dot(transform.up, Vector3.up)); 
+        sensor.AddObservation(transform.InverseTransformDirection(transform.position - lastPosition)); 
         
-        // SLAM NAVIGATION HINT (3 Observations)
         Vector3 navDir = Vector3.zero;
         if (slamMapper != null && nextPathPoint != Vector3.zero)
         {
             navDir = (nextPathPoint - transform.position).normalized;
             navDir = transform.InverseTransformDirection(navDir); 
         }
-        sensor.AddObservation(navDir); // 3
+        sensor.AddObservation(navDir); 
 
         lastPosition = transform.position;
     }
 
     void FixedUpdate()
     {
-        // SLAM INTEGRATION:
         if (slamMapper != null)
         {
-            // 1. Scan Surface
+            // Note: ScanTerrainSurface now has internal throttling in the Mapper
             if (moonTerrain != null && moonTerrain.terrain != null)
             {
                 slamMapper.ScanTerrainSurface(moonTerrain.terrain);
             }
 
-            // 2. Navigation Update (Every 0.2s)
             navTimer += Time.fixedDeltaTime;
             if (navTimer > 0.2f)
             {
                 navTimer = 0;
                 
                 if (returnToHomeMode)
-                {
-                    // RTH Logic: Target is Origin
                     slamMapper.RecalculatePath(transform.position, slamMapper.originPosition);
-                }
                 else
-                {
-                    // Normal Logic: Exploration
                     slamMapper.RecalculateExplorationPath(transform.position); 
-                }
                 
                 nextPathPoint = slamMapper.GetNextPathPoint(transform.position);
             }
         }
 
-        // AUTO-PILOT FOR RETURN TO HOME
-        // We override the Neural Network if Return Home is active
         if (returnToHomeMode)
         {
             PerformReturnHomeLogic();
         }
     }
 
-    // Explicit PID controller to drive home
     private void PerformReturnHomeLogic()
     {
         if (nextPathPoint == Vector3.zero) return;
@@ -277,17 +258,14 @@ public class MoonRoverAgent : Agent
         Vector3 localTarget = transform.InverseTransformDirection(targetDir);
         
         float steer = Mathf.Clamp(localTarget.x * 2.0f, -1f, 1f);
-        float motor = 0.5f; // Constant gentle speed
+        float motor = 0.5f; 
 
-        // If sharp turn, slow down
         if (Mathf.Abs(steer) > 0.5f) motor = 0.2f;
 
-        // Apply
         ApplyPhysics(motor, steer);
         SyncWheelVisuals();
         UpdateVisualPerformance();
         
-        // Stop if home
         if (Vector3.Distance(transform.position, slamMapper.originPosition) < 3.0f)
         {
             rb.linearVelocity = Vector3.zero;
@@ -297,7 +275,6 @@ public class MoonRoverAgent : Agent
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        // If returning home, ignore NN actions
         if (returnToHomeMode) return;
 
         ApplyPhysics(actions.ContinuousActions[0], actions.ContinuousActions[1]);
@@ -363,7 +340,6 @@ public class MoonRoverAgent : Agent
             bool isLast = (currentWaypointIndex >= moonTerrain.ActiveCheckpoints.Count - 1);
             float scaledReward = 2.0f + (currentWaypointIndex * 1.5f);
             
-            // SLAM Update: Record this as a key location!
             if (slamMapper != null) slamMapper.AddKeyLocation(transform.position);
 
             if (isLast)
@@ -393,6 +369,7 @@ public class MoonRoverAgent : Agent
 
     private void SyncWheelVisuals()
     {
+        if (Time.frameCount % 2 != 0) return; // Sync visuals every other frame
         for (int i = 0; i < wheels.Count; i++)
         {
             if (i >= wheelMeshes.Count) break;
