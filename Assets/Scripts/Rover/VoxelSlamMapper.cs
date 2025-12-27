@@ -1,0 +1,462 @@
+using UnityEngine;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+[RequireComponent(typeof(MoonRoverAgent))]
+public class VoxelSlamMapper : MonoBehaviour
+{
+    [Header("Debug Visualization")]
+    public bool showLidarGizmos = true;
+    public bool showTrajectory = true;
+    public bool showCalculatedPath = true;
+    public bool showExplorationTarget = true;
+
+    [Header("Mode Selection")]
+    public bool useRealGameObjects = true; 
+
+    [Header("3D Map Settings")]
+    public float granularity = 0.5f; 
+    public Material obstacleMaterial; 
+    public Material visitedGroundMaterial; 
+    
+    [Header("CPU Mode Settings")]
+    public GameObject voxelPrefab; 
+    
+    [Header("Layer Settings")]
+    public int mapLayer = 9; 
+    public LayerMask obstacleMask; 
+
+    [Header("Lidar Overrides")]
+    [Range(1f, 90f)]
+    public float verticalScanAngle = 15f; 
+
+    [Header("Pathfinding")]
+    public int maxPathIterations = 2000; 
+    
+    // --- SLAM DATA ---
+    private Vector3 originPosition; 
+    
+    // Exploration Heuristic Data
+    private float maxDistanceFromOrigin = 0f;
+    private Vector3Int furthestVoxel = Vector3Int.zero;
+
+    private HashSet<Vector3Int> occupiedVoxels = new HashSet<Vector3Int>(); 
+    private HashSet<Vector3Int> visitedGroundVoxels = new HashSet<Vector3Int>(); 
+    private List<Vector3> trajectory = new List<Vector3>();
+    private List<Vector3> keyLocations = new List<Vector3>(); 
+    
+    // Navigation Data
+    private List<Vector3> currentCalculatedPath = new List<Vector3>();
+
+    // GPU Instancing Storage
+    private List<Matrix4x4[]> obstacleBatches = new List<Matrix4x4[]>();
+    private List<Matrix4x4> currentObstacleBatch = new List<Matrix4x4>();
+    
+    private List<Matrix4x4[]> groundBatches = new List<Matrix4x4[]>();
+    private List<Matrix4x4> currentGroundBatch = new List<Matrix4x4>();
+
+    // CPU Storage
+    private Transform mapContainer;
+    private MoonRoverAgent agent;
+    private Mesh cubeMesh; 
+
+    [System.Serializable]
+    public class SlamMapData
+    {
+        public string roverName;
+        public Vector3 origin;
+        public List<Vector3> trajectory;
+        public List<Vector3> obstacles;
+        public List<Vector3> safeGround;
+        public List<Vector3> keyLocations;
+        public float finalScore;
+    }
+
+    void Start()
+    {
+        agent = GetComponent<MoonRoverAgent>();
+        InitializeContainer();
+        
+        GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        cubeMesh = temp.GetComponent<MeshFilter>().sharedMesh;
+        Destroy(temp);
+
+        if (obstacleMaterial) obstacleMaterial.enableInstancing = true;
+        if (visitedGroundMaterial) visitedGroundMaterial.enableInstancing = true;
+    }
+
+    private void InitializeContainer()
+    {
+        if (mapContainer == null)
+        {
+            GameObject go = new GameObject($"{this.name}_Map_Container");
+            mapContainer = go.transform;
+        }
+    }
+
+    void FixedUpdate()
+    {
+        Perform3DLidarScan();
+        UpdateTrajectory();
+    }
+
+    void Update()
+    {
+        if (!useRealGameObjects)
+        {
+            RenderGPU(obstacleBatches, currentObstacleBatch, obstacleMaterial);
+            RenderGPU(groundBatches, currentGroundBatch, visitedGroundMaterial);
+        }
+    }
+
+    public void SetOrigin(Vector3 pos)
+    {
+        originPosition = pos;
+        ResetMap();
+        AddKeyLocation(pos);
+    }
+
+    public void ResetMap()
+    {
+        occupiedVoxels.Clear();
+        visitedGroundVoxels.Clear();
+        trajectory.Clear();
+        keyLocations.Clear();
+        currentCalculatedPath.Clear();
+
+        // Reset Heuristic
+        maxDistanceFromOrigin = 0f;
+        furthestVoxel = Vector3Int.zero;
+
+        obstacleBatches.Clear();
+        currentObstacleBatch.Clear();
+        groundBatches.Clear();
+        currentGroundBatch.Clear();
+
+        if (mapContainer != null)
+        {
+            foreach (Transform child in mapContainer) Destroy(child.gameObject);
+        }
+    }
+
+    public void AddKeyLocation(Vector3 pos)
+    {
+        keyLocations.Add(pos);
+    }
+
+    private void UpdateTrajectory()
+    {
+        if (trajectory.Count == 0 || Vector3.Distance(trajectory[trajectory.Count - 1], transform.position) > 0.5f)
+        {
+            trajectory.Add(transform.position);
+        }
+    }
+
+    public void ScanTerrainSurface(Terrain terrain)
+    {
+        if (terrain == null) return;
+        int radiusSteps = 2; 
+        float checkStep = granularity;
+
+        for (int x = -radiusSteps; x <= radiusSteps; x++)
+        {
+            for (int z = -radiusSteps; z <= radiusSteps; z++)
+            {
+                Vector3 checkPos = transform.position + (transform.right * x * checkStep) + (transform.forward * z * checkStep);
+                float terrainHeight = terrain.SampleHeight(checkPos) + terrain.transform.position.y;
+                
+                if (Mathf.Abs(checkPos.y - terrainHeight) < 2.0f)
+                {
+                    Vector3 surfacePoint = new Vector3(checkPos.x, terrainHeight, checkPos.z);
+                    RegisterVoxel(surfacePoint, false); 
+                }
+            }
+        }
+    }
+
+    // ==================================================================================
+    // PATHFINDING (A*) & EXPLORATION HEURISTIC
+    // ==================================================================================
+
+    public Vector3 GetNextPathPoint(Vector3 currentPos)
+    {
+        if (currentCalculatedPath == null || currentCalculatedPath.Count == 0) return Vector3.zero;
+
+        while(currentCalculatedPath.Count > 0 && Vector3.Distance(currentPos, currentCalculatedPath[0]) < 2.0f)
+        {
+            currentCalculatedPath.RemoveAt(0);
+        }
+
+        if (currentCalculatedPath.Count > 0) return currentCalculatedPath[0];
+        return Vector3.zero;
+    }
+
+    /// <summary>
+    /// Calculates a path to the FURTHEST KNOWN SAFE POINT from the origin.
+    /// This acts as a heuristic to "Find the End Flag" by constantly expanding boundaries.
+    /// </summary>
+    public void RecalculateExplorationPath(Vector3 startPos)
+    {
+        if (visitedGroundVoxels.Count == 0) return;
+        if (furthestVoxel == Vector3Int.zero) return;
+
+        // Our target is simply the furthest point we have ever mapped
+        Vector3 targetPos = GridToWorld(furthestVoxel);
+        
+        // Use A* to find the best route through verified ground to get there
+        currentCalculatedPath = FindPathAStar(startPos, targetPos);
+    }
+
+    public void RecalculatePath(Vector3 startPos, Vector3 targetPos)
+    {
+        currentCalculatedPath = FindPathAStar(startPos, targetPos);
+    }
+
+    private List<Vector3> FindPathAStar(Vector3 start, Vector3 end)
+    {
+        Vector3Int startNode = WorldToGrid(start);
+        Vector3Int targetNode = WorldToGrid(end);
+
+        if (!visitedGroundVoxels.Contains(startNode)) startNode = FindClosestVisited(startNode);
+        if (!visitedGroundVoxels.Contains(targetNode)) targetNode = FindClosestVisited(targetNode);
+        
+        if (startNode == targetNode) return new List<Vector3>();
+
+        // A* Setup
+        HashSet<Vector3Int> closedSet = new HashSet<Vector3Int>();
+        Dictionary<Vector3Int, Vector3Int> cameFrom = new Dictionary<Vector3Int, Vector3Int>();
+        Dictionary<Vector3Int, float> gScore = new Dictionary<Vector3Int, float>();
+        List<Vector3Int> openSet = new List<Vector3Int>();
+        
+        openSet.Add(startNode);
+        gScore[startNode] = 0;
+
+        Dictionary<Vector3Int, float> fScore = new Dictionary<Vector3Int, float>();
+        fScore[startNode] = Vector3.Distance(GridToWorld(startNode), GridToWorld(targetNode));
+
+        int iterations = 0;
+
+        while (openSet.Count > 0)
+        {
+            if (iterations++ > maxPathIterations) break;
+
+            Vector3Int current = openSet[0];
+            float lowestF = fScore.ContainsKey(current) ? fScore[current] : float.MaxValue;
+
+            for (int i = 1; i < openSet.Count; i++)
+            {
+                float f = fScore.ContainsKey(openSet[i]) ? fScore[openSet[i]] : float.MaxValue;
+                if (f < lowestF)
+                {
+                    current = openSet[i];
+                    lowestF = f;
+                }
+            }
+
+            if (current == targetNode) return ReconstructPath(cameFrom, current);
+
+            openSet.Remove(current);
+            closedSet.Add(current);
+
+            foreach (Vector3Int neighbor in GetNeighbors(current))
+            {
+                if (closedSet.Contains(neighbor)) continue;
+                if (occupiedVoxels.Contains(neighbor)) continue; 
+                if (!visitedGroundVoxels.Contains(neighbor)) continue; 
+
+                float tentativeG = gScore[current] + Vector3.Distance(GridToWorld(current), GridToWorld(neighbor));
+
+                if (!openSet.Contains(neighbor)) openSet.Add(neighbor);
+                else if (tentativeG >= (gScore.ContainsKey(neighbor) ? gScore[neighbor] : float.MaxValue)) continue;
+
+                cameFrom[neighbor] = current;
+                gScore[neighbor] = tentativeG;
+                fScore[neighbor] = gScore[neighbor] + Vector3.Distance(GridToWorld(neighbor), GridToWorld(targetNode));
+            }
+        }
+
+        return new List<Vector3>();
+    }
+
+    private List<Vector3> ReconstructPath(Dictionary<Vector3Int, Vector3Int> cameFrom, Vector3Int current)
+    {
+        List<Vector3> path = new List<Vector3>();
+        path.Add(GridToWorld(current));
+        while (cameFrom.ContainsKey(current))
+        {
+            current = cameFrom[current];
+            path.Add(GridToWorld(current));
+        }
+        path.Reverse();
+        return path;
+    }
+
+    private IEnumerable<Vector3Int> GetNeighbors(Vector3Int center)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            for (int z = -1; z <= 1; z++)
+            {
+                if (x == 0 && z == 0) continue;
+                for (int y = -1; y <= 1; y++) 
+                    yield return center + new Vector3Int(x, y, z);
+            }
+        }
+    }
+
+    private Vector3Int FindClosestVisited(Vector3Int p)
+    {
+        if (visitedGroundVoxels.Count == 0) return p;
+        for(int r=1; r<5; r++) {
+            for(int x=-r; x<=r; x++) for(int y=-r; y<=r; y++) for(int z=-r; z<=r; z++) {
+                Vector3Int n = p + new Vector3Int(x,y,z);
+                if(visitedGroundVoxels.Contains(n)) return n;
+            }
+        }
+        return p;
+    }
+
+    private Vector3Int WorldToGrid(Vector3 pos) => new Vector3Int(Mathf.FloorToInt(pos.x / granularity), Mathf.FloorToInt(pos.y / granularity), Mathf.FloorToInt(pos.z / granularity));
+    private Vector3 GridToWorld(Vector3Int grid) => new Vector3(grid.x * granularity + (granularity * 0.5f), grid.y * granularity + (granularity * 0.5f), grid.z * granularity + (granularity * 0.5f));
+
+    // ==================================================================================
+    // LIDAR & CORE
+    // ==================================================================================
+
+    private void Perform3DLidarScan()
+    {
+        if (agent == null || agent.lidarSensors == null) return;
+        float maxDist = agent.lidarRayLength;
+        float hAngleTotal = agent.lidarRayDegrees;
+        int hRays = (agent.lidarRaysPerDirection * 2) + 1;
+        float hStep = hRays > 1 ? (hAngleTotal * 2) / (hRays - 1) : 0;
+        
+        float vAngleTotal = verticalScanAngle;
+        int vRays = (agent.lidarVerticalRaysPerDirection * 2) + 1;
+        float vStep = vRays > 1 ? (vAngleTotal * 2) / (vRays - 1) : 0;
+
+        foreach (var sensorObj in agent.lidarSensors)
+        {
+            if (!sensorObj) continue;
+            Vector3 origin = sensorObj.transform.position;
+            Quaternion rot = sensorObj.transform.rotation;
+            for (int v = 0; v < vRays; v++)
+            {
+                float vAngle = -vAngleTotal + (v * vStep);
+                Quaternion vRot = Quaternion.AngleAxis(vAngle, Vector3.right); 
+                for (int h = 0; h < hRays; h++)
+                {
+                    float hAngle = -hAngleTotal + (h * hStep);
+                    Quaternion hRot = Quaternion.AngleAxis(hAngle, Vector3.up);
+                    Vector3 dir = rot * hRot * vRot * Vector3.forward;
+                    if (Physics.Raycast(origin, dir, out RaycastHit hit, maxDist, obstacleMask))
+                        RegisterVoxel(hit.point, true);
+                }
+            }
+        }
+    }
+
+    private void RegisterVoxel(Vector3 pos, bool isObstacle)
+    {
+        int x = Mathf.FloorToInt(pos.x / granularity);
+        int y = Mathf.FloorToInt(pos.y / granularity);
+        int z = Mathf.FloorToInt(pos.z / granularity);
+        Vector3Int coord = new Vector3Int(x, y, z);
+
+        HashSet<Vector3Int> targetSet = isObstacle ? occupiedVoxels : visitedGroundVoxels;
+        if (isObstacle && visitedGroundVoxels.Contains(coord)) return; 
+        if (!isObstacle && occupiedVoxels.Contains(coord)) return;
+
+        if (!targetSet.Contains(coord))
+        {
+            targetSet.Add(coord);
+            Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
+
+            if (useRealGameObjects) SpawnBlock(centerPos, isObstacle);
+            else AddToRenderBatch(Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity), isObstacle ? currentObstacleBatch : currentGroundBatch, isObstacle ? obstacleBatches : groundBatches);
+        
+            // --- EXPLORATION HEURISTIC UPDATE ---
+            // If this is new Safe Ground, check if it's the furthest from home
+            if (!isObstacle)
+            {
+                float distSq = (pos - originPosition).sqrMagnitude;
+                if (distSq > maxDistanceFromOrigin)
+                {
+                    maxDistanceFromOrigin = distSq;
+                    furthestVoxel = coord;
+                }
+            }
+        }
+    }
+
+    private void SpawnBlock(Vector3 pos, bool isObstacle)
+    {
+        InitializeContainer();
+        GameObject block;
+        if (voxelPrefab != null) block = Instantiate(voxelPrefab, pos, Quaternion.identity, mapContainer);
+        else { block = GameObject.CreatePrimitive(PrimitiveType.Cube); block.transform.position = pos; block.transform.parent = mapContainer; }
+        
+        block.transform.localScale = Vector3.one * granularity;
+        block.layer = mapLayer; 
+        
+        Material matToUse = isObstacle ? obstacleMaterial : visitedGroundMaterial;
+        if (matToUse != null) { var rend = block.GetComponent<Renderer>(); if (rend) rend.material = matToUse; }
+        
+        Collider col = block.GetComponent<Collider>();
+        if (col) Destroy(col);
+        block.SetActive(true);
+    }
+
+    private void AddToRenderBatch(Matrix4x4 mat, List<Matrix4x4> currentList, List<Matrix4x4[]> batchList)
+    {
+        currentList.Add(mat);
+        if (currentList.Count >= 1023) { batchList.Add(currentList.ToArray()); currentList.Clear(); }
+    }
+
+    private void RenderGPU(List<Matrix4x4[]> batches, List<Matrix4x4> current, Material mat)
+    {
+        if (mat == null || cubeMesh == null) return;
+        foreach (var batch in batches) Graphics.DrawMeshInstanced(cubeMesh, 0, mat, batch, batch.Length, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, mapLayer);
+        if (current.Count > 0) Graphics.DrawMeshInstanced(cubeMesh, 0, mat, current, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, mapLayer);
+    }
+
+    public string GetSerializationData()
+    {
+        SlamMapData data = new SlamMapData();
+        data.roverName = gameObject.name;
+        data.origin = originPosition;
+        data.finalScore = agent.GetDistanceMetric();
+        
+        data.obstacles = occupiedVoxels.Select(v => new Vector3(v.x, v.y, v.z) * granularity).ToList();
+        data.safeGround = visitedGroundVoxels.Select(v => new Vector3(v.x, v.y, v.z) * granularity).ToList();
+        data.trajectory = new List<Vector3>(trajectory);
+        data.keyLocations = new List<Vector3>(keyLocations);
+
+        return JsonUtility.ToJson(data, true);
+    }
+
+    private void OnDrawGizmos()
+    {
+        if (showCalculatedPath && currentCalculatedPath != null && currentCalculatedPath.Count > 0)
+        {
+            Gizmos.color = Color.green;
+            for(int i=0; i<currentCalculatedPath.Count-1; i++) Gizmos.DrawLine(currentCalculatedPath[i], currentCalculatedPath[i+1]);
+        }
+
+        if (showExplorationTarget && furthestVoxel != Vector3Int.zero)
+        {
+            Gizmos.color = Color.red;
+            Gizmos.DrawWireSphere(GridToWorld(furthestVoxel), 1.0f);
+        }
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        if (showTrajectory && trajectory.Count > 1)
+        {
+            Gizmos.color = Color.yellow;
+            for(int i=0; i<trajectory.Count-1; i++) Gizmos.DrawLine(trajectory[i], trajectory[i+1]);
+        }
+    }
+}

@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
 
 public class GenerationManager : MonoBehaviour
 {
@@ -126,9 +127,25 @@ public class GenerationManager : MonoBehaviour
         }
     }
 
+    private void ExportBestRoverMap()
+    {
+        if (currentLeader == null || currentLeader.slamMapper == null) 
+        {
+            Debug.LogWarning("No leader or leader has no SLAM Mapper to export.");
+            return;
+        }
+
+        string json = currentLeader.slamMapper.GetSerializationData();
+        string filename = $"RoverMap_Gen{generationCount}_{System.DateTime.Now:MM-dd-HH-mm-ss}.json";
+        string path = Path.Combine(Application.dataPath, filename);
+        
+        File.WriteAllText(path, json);
+        Debug.Log($"<color=green>Map Exported to: {path}</color>");
+    }
+
     void OnGUI()
     {
-        GUI.Box(new Rect(10, 10, 300, 220), "<b>ASTROBOT COMMAND</b>");
+        GUI.Box(new Rect(10, 10, 300, 260), "<b>ASTROBOT COMMAND</b>");
         
         // FPS Meter
         GUIStyle style = new GUIStyle(GUI.skin.label);
@@ -157,5 +174,13 @@ public class GenerationManager : MonoBehaviour
 
         if (GUI.Button(new Rect(25, 180, 120, 25), "FORCE RESET")) StartNewGeneration();
         if (GUI.Button(new Rect(155, 180, 120, 25), "RE-CACHE")) RefreshAgentList();
+        
+        // --- NEW EXPORT BUTTON ---
+        GUI.color = Color.cyan;
+        if (GUI.Button(new Rect(25, 220, 250, 30), "EXPORT BEST SLAM MAP"))
+        {
+            ExportBestRoverMap();
+        }
+        GUI.color = Color.white;
     }
 }

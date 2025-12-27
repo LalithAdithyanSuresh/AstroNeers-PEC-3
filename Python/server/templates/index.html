@@ -110,6 +110,17 @@
         color: #000;
         box-shadow: 0 0 20px #ff9f43;
     }
+    .btn-visualize {
+        background: transparent;
+        border: 1px solid var(--neon-blue);
+        color: var(--neon-blue);
+        margin-left: 10px;
+    }
+    .btn-visualize:hover {
+        background: var(--neon-blue);
+        color: #000;
+        box-shadow: 0 0 20px var(--neon-blue);
+    }
 </style>
 </head>
 <body class="p-4">
@@ -122,9 +133,14 @@
             </h1>
             <small class="text-muted">AstroBOT Neural Configuration Interface</small>
         </div>
-        <button onclick="launchTensorboard()" class="btn btn-tensor px-4 py-2">
-            📊 Launch TensorBoard
-        </button>
+        <div>
+            <button onclick="visualizeMap()" class="btn btn-visualize px-4 py-2">
+                対 Visualize 3D Map
+            </button>
+            <button onclick="launchTensorboard()" class="btn btn-tensor px-4 py-2">
+                投 Launch TensorBoard
+            </button>
+        </div>
     </div>
 
     <div class="row g-4">
@@ -158,7 +174,7 @@
 
                     <div class="d-grid">
                         <button onclick="startTraining()" class="btn btn-space py-3">
-                            🚀 Initiate Sequence
+                            噫 Initiate Sequence
                         </button>
                     </div>
                 </div>
@@ -173,8 +189,8 @@
         <div class="col-lg-8">
             <div class="glass-panel">
                 <div class="editor-header d-flex justify-content-between align-items-center">
-                    <span class="text-white fw-bold">📝 moon_rover_config.yaml</span>
-                    <button onclick="saveYaml()" class="btn btn-sm btn-outline-light">💾 Save Config</button>
+                    <span class="text-white fw-bold">統 moon_rover_config.yaml</span>
+                    <button onclick="saveYaml()" class="btn btn-sm btn-outline-light">沈 Save Config</button>
                 </div>
                 <textarea id="yaml-editor">{{ yaml_content }}</textarea>
             </div>
@@ -262,6 +278,11 @@
         fetch('/launch_tensorboard')
         .then(res => res.json())
         .then(data => alert("TensorBoard Launching in new window... Check http://localhost:6006"));
+    }
+
+    function visualizeMap() {
+        // Opens the 3D map viewer in a new tab
+        window.open('/view_map', '_blank');
     }
 </script>
 </body>

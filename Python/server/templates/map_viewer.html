@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Mission Visualizer</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- Three.js & OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #0b0d17; color: #fff; font-family: 'Roboto Mono', monospace; }
+        
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0; width: 100%;
+            padding: 20px;
+            pointer-events: none; /* Let clicks pass through to 3D canvas */
+            display: flex;
+            justify-content: space-between;
+            z-index: 10;
+        }
+
+        h1 { margin: 0; font-family: 'Orbitron', sans-serif; color: #00d2ff; font-size: 24px; text-shadow: 0 0 10px rgba(0, 210, 255, 0.5); }
+        .stats { background: rgba(0, 0, 0, 0.6); padding: 10px 20px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(4px); pointer-events: auto; }
+        .stat-row { margin-bottom: 5px; font-size: 14px; color: #ccc; }
+        .stat-val { color: #fff; font-weight: bold; }
+
+        /* Upload Button Style */
+        .btn-upload {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 15px;
+            background: linear-gradient(90deg, #d53f8c 0%, #6a11cb 100%);
+            color: white;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 12px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: 0.3s;
+            pointer-events: auto;
+        }
+        .btn-upload:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 15px rgba(213, 63, 140, 0.6);
+        }
+
+        #legend {
+            position: absolute;
+            bottom: 20px; right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            pointer-events: auto;
+        }
+        .legend-item { display: flex; align-items: center; margin-bottom: 5px; font-size: 12px; color: #eee; }
+        .color-box { width: 15px; height: 15px; margin-right: 10px; border-radius: 3px; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
+        
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: 'Orbitron';
+            color: #00d2ff;
+            font-size: 24px;
+            letter-spacing: 2px;
+            background: rgba(0,0,0,0.8);
+            padding: 20px 40px;
+            border-radius: 10px;
+            border: 1px solid #00d2ff;
+            box-shadow: 0 0 30px rgba(0, 210, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- UI Overlay -->
+    <div id="ui-layer">
+        <div class="stats">
+            <h1>MISSION REPLAY // 3D</h1>
+            
+            <!-- MANUAL UPLOAD BUTTON -->
+            <label class="btn-upload">
+                📂 Open Map File
+                <input type="file" id="file-input" accept=".json" style="display:none;">
+            </label>
+
+            <div class="mt-2" style="margin-top:15px;">
+                <div class="stat-row">FILE: <span id="filename" class="stat-val">Waiting for data...</span></div>
+            </div>
+        </div>
+        <div class="stats" style="text-align: right;">
+            <div class="stat-row">UNIT: <span id="rover-name" class="stat-val">--</span></div>
+            <div class="stat-row">SCORE: <span id="score" class="stat-val" style="color: #ffd700;">--</span></div>
+        </div>
+    </div>
+
+    <div id="loading">SEARCHING FOR TELEMETRY...</div>
+
+    <div id="legend">
+        <div class="legend-item"><div class="color-box" style="background:#ff3333;"></div> Obstacle (Cube)</div>
+        <div class="legend-item"><div class="color-box" style="background:rgba(0, 210, 255, 0.5); border:1px solid #00d2ff;"></div> Safe Ground</div>
+        <div class="legend-item"><div class="color-box" style="background:#ffd700;"></div> Trajectory</div>
+        <div class="legend-item"><div class="color-box" style="background:#0f0;"></div> Start Point</div>
+    </div>
+
+    <!-- 3D Container -->
+    <div id="canvas-container"></div>
+
+<script>
+    // --- 1. SETUP THREE.JS SCENE ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0d17);
+    // scene.fog = new THREE.FogExp2(0x0b0d17, 0.02); // DISABLED per user request
+
+    // Create a container group for the map elements so we can easily clear them later
+    const worldGroup = new THREE.Group();
+    scene.add(worldGroup);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 20, 20); // High angle view
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+    // --- 2. LIGHTING ---
+    const ambientLight = new THREE.AmbientLight(0x404040, 1.5); // Soft white light
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+    dirLight.position.set(10, 20, 10);
+    dirLight.castShadow = true;
+    scene.add(dirLight);
+    
+    const rimLight = new THREE.DirectionalLight(0x00d2ff, 0.5);
+    rimLight.position.set(-10, 10, -10);
+    scene.add(rimLight);
+
+    // --- 3. CONTROLS ---
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2 - 0.1; // Prevent going below ground
+
+    // --- 4. HELPERS ---
+    const gridHelper = new THREE.GridHelper(100, 100, 0x1f2235, 0x1f2235);
+    scene.add(gridHelper);
+
+
+    // --- 5. DATA HANDLING ---
+
+    // A. Manual File Upload Listener
+    document.getElementById('file-input').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const json = JSON.parse(e.target.result);
+                // Inject filename for display
+                json.filename = file.name;
+                
+                // Reset scene and load new data
+                clearWorld();
+                updateUI(json);
+                buildWorld(json);
+                
+                document.getElementById('loading').style.display = 'none';
+            } catch (err) {
+                alert("Error parsing JSON: " + err);
+            }
+        };
+        reader.readAsText(file);
+    });
+
+    // B. Automatic Fetch on Load (Optional convenience)
+    fetch('/get_latest_map')
+        .then(res => {
+            if(!res.ok) throw new Error("Map data unavailable");
+            return res.json();
+        })
+        .then(data => {
+            document.getElementById('loading').style.display = 'none';
+            updateUI(data);
+            buildWorld(data);
+        })
+        .catch(err => {
+            console.warn("Auto-fetch failed:", err);
+            document.getElementById('loading').innerText = "WAITING FOR FILE UPLOAD...";
+            document.getElementById('loading').style.borderColor = "#444";
+            document.getElementById('loading').style.color = "#888";
+            // We don't demo mode here, just wait for user to click button
+        });
+
+
+    function clearWorld() {
+        // Remove all children from the world group to clear previous map
+        while(worldGroup.children.length > 0){ 
+            const object = worldGroup.children[0];
+            if(object.geometry) object.geometry.dispose();
+            if(object.material) {
+                if (Array.isArray(object.material)) {
+                    object.material.forEach(material => material.dispose());
+                } else {
+                    object.material.dispose();
+                }
+            }
+            worldGroup.remove(object); 
+        }
+    }
+
+    function updateUI(data) {
+        document.getElementById('filename').innerText = data.filename || "Uploaded File";
+        document.getElementById('rover-name').innerText = data.roverName || "Unknown";
+        document.getElementById('score').innerText = data.finalScore ? Math.round(data.finalScore) : "N/A";
+    }
+
+    function buildWorld(data) {
+        const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+        const groundGeo = new THREE.BoxGeometry(1, 0.1, 1);
+        
+        const obstacleMat = new THREE.MeshStandardMaterial({ color: 0xff3333, roughness: 0.7, metalness: 0.1 });
+        const safeMat = new THREE.MeshStandardMaterial({ color: 0x00d2ff, transparent: true, opacity: 0.3, roughness: 0.2 });
+
+        // 1. Obstacles
+        if (data.obstacles && data.obstacles.length > 0) {
+            const instancedObstacles = new THREE.InstancedMesh(boxGeo, obstacleMat, data.obstacles.length);
+            const dummy = new THREE.Object3D();
+            
+            data.obstacles.forEach((p, i) => {
+                // Use p.y if available (for 3D maps), otherwise default to 0.5 (half unit height)
+                const y = (p.y !== undefined) ? p.y : 0.5;
+                dummy.position.set(p.x, y, p.z);
+                dummy.updateMatrix();
+                instancedObstacles.setMatrixAt(i, dummy.matrix);
+            });
+            instancedObstacles.castShadow = true;
+            instancedObstacles.receiveShadow = true;
+            worldGroup.add(instancedObstacles);
+        }
+
+        // 2. Safe Ground
+        if (data.safeGround && data.safeGround.length > 0) {
+            const instancedGround = new THREE.InstancedMesh(groundGeo, safeMat, data.safeGround.length);
+            const dummy = new THREE.Object3D();
+
+            data.safeGround.forEach((p, i) => {
+                const y = (p.y !== undefined) ? p.y : 0;
+                dummy.position.set(p.x, y, p.z);
+                dummy.updateMatrix();
+                instancedGround.setMatrixAt(i, dummy.matrix);
+            });
+            instancedGround.receiveShadow = true;
+            worldGroup.add(instancedGround);
+        }
+
+        // 3. Trajectory
+        if (data.trajectory && data.trajectory.length > 0) {
+            const points = data.trajectory.map(p => new THREE.Vector3(p.x, (p.y !== undefined ? p.y : 0) + 0.2, p.z));
+            const pathGeo = new THREE.BufferGeometry().setFromPoints(points);
+            const pathMat = new THREE.LineBasicMaterial({ color: 0xffd700, linewidth: 2 });
+            const line = new THREE.Line(pathGeo, pathMat);
+            worldGroup.add(line);
+
+            // Start/End Markers
+            const startSphere = new THREE.Mesh(new THREE.SphereGeometry(0.3), new THREE.MeshBasicMaterial({color: 0x00ff00}));
+            startSphere.position.copy(points[0]);
+            worldGroup.add(startSphere);
+
+            // Center Camera
+            controls.target.copy(points[0]);
+            camera.position.set(points[0].x + 10, 10, points[0].z + 10);
+            controls.update();
+        }
+    }
+
+    // --- 6. ANIMATION LOOP ---
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    // --- 7. RESIZE HANDLER ---
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+</script>
+</body>
+</html>

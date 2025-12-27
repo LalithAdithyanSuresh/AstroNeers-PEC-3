@@ -38,7 +38,7 @@ public class MoonRoverAgent : Agent
     [Header("5. Safety & Performance Settings")]
     public string obstacleTag = "Rocks";
     public float collisionPenalty = -10.0f;
-    public float backtrackingPenalty = -0.05f; // Increased penalty for moving backwards
+    public float backtrackingPenalty = -0.05f; 
     
     // Internal State
     private Rigidbody rb;
@@ -49,10 +49,19 @@ public class MoonRoverAgent : Agent
     private float currentPerformanceMetric = 0f;
     private GenerationManager manager;
     
+    // Reference to the SLAM Mapper
+    public VoxelSlamMapper slamMapper { get; private set; } // Public getter for Manager to access
+    
+    // Navigation Timer
+    private float navTimer = 0;
+    private Vector3 nextPathPoint = Vector3.zero;
+
     public override void Initialize()
     {
         rb = GetComponent<Rigidbody>();
         manager = FindObjectOfType<GenerationManager>();
+        slamMapper = GetComponent<VoxelSlamMapper>();
+
         if (moonTerrain == null) moonTerrain = FindObjectOfType<TerrainGenerator>();
         
         MaxStep = episodeStepLimit;
@@ -102,10 +111,6 @@ public class MoonRoverAgent : Agent
         EndEpisode(); 
     }
 
-    /// <summary>
-    /// Sets the material of the rover's body. 
-    /// Used by the GenerationManager to highlight specific rovers.
-    /// </summary>
     public void SetBodyMaterial(Material mat)
     {
         if (bodyRenderer != null && mat != null)
@@ -118,7 +123,6 @@ public class MoonRoverAgent : Agent
     {
         if (bodyRenderer == null) return;
         
-        // Calculate performance (0 to 1) based on speed and alignment with target
         float speedFactor = Mathf.Clamp01(rb.linearVelocity.magnitude / maxSpeed);
         float alignment = 0;
         if(currentTarget != null)
@@ -126,10 +130,8 @@ public class MoonRoverAgent : Agent
             alignment = Mathf.Clamp01(Vector3.Dot(transform.forward, (currentTarget.position - transform.position).normalized));
         }
 
-        // Smooth transition for the performance metric
         currentPerformanceMetric = Mathf.Lerp(currentPerformanceMetric, speedFactor * alignment, Time.deltaTime * 3f);
         
-        // Shift color: Red (0) -> Yellow (0.5) -> Green (1.0)
         Color perfColor;
         if (currentPerformanceMetric < 0.5f)
             perfColor = Color.Lerp(Color.red, Color.yellow, currentPerformanceMetric * 2f);
@@ -137,7 +139,6 @@ public class MoonRoverAgent : Agent
             perfColor = Color.Lerp(Color.yellow, Color.green, (currentPerformanceMetric - 0.5f) * 2f);
 
         bodyRenderer.material.color = perfColor;
-        // Make it glow slightly
         bodyRenderer.material.EnableKeyword("_EMISSION");
         bodyRenderer.material.SetColor("_EmissionColor", perfColor * 0.4f);
     }
@@ -156,6 +157,12 @@ public class MoonRoverAgent : Agent
         rb.angularVelocity = Vector3.zero;
         currentWaypointIndex = 0;
 
+        // Reset the SLAM Map and Set LOCALIZED ORIGIN
+        if (slamMapper != null)
+        {
+            slamMapper.SetOrigin(transform.position);
+        }
+
         if (moonTerrain != null)
         {
             if (moonTerrain.ActiveCheckpoints.Count > 0)
@@ -169,9 +176,9 @@ public class MoonRoverAgent : Agent
 
     public override void CollectObservations(VectorSensor sensor)
     {
-        // currentTarget is null, add 12 zeroes to match the observation count below
-        if (currentTarget == null) { sensor.AddObservation(new float[12]); return; }
+        if (currentTarget == null) { sensor.AddObservation(new float[12 + 3]); return; } 
 
+        // Observations of State
         Vector3 vectorToTarget = currentTarget.position - transform.position;
         Vector3 localTarget = transform.InverseTransformDirection(vectorToTarget);
         sensor.AddObservation(localTarget.normalized); // 3
@@ -184,7 +191,41 @@ public class MoonRoverAgent : Agent
         sensor.AddObservation(Vector3.Dot(transform.up, Vector3.up)); // 1
         sensor.AddObservation(transform.InverseTransformDirection(transform.position - lastPosition)); // 3
         
+        // NEW: SLAM NAVIGATION HINT (3 Observations)
+        // Provides the direction to the FURTHEST EXPLORED POINT (Heuristic)
+        // This replaces the explicit "Checkpoint" navigation for the Neural Network's planning
+        Vector3 navDir = Vector3.zero;
+        if (slamMapper != null && nextPathPoint != Vector3.zero)
+        {
+            navDir = (nextPathPoint - transform.position).normalized;
+            navDir = transform.InverseTransformDirection(navDir); // Local space
+        }
+        sensor.AddObservation(navDir); // 3
+
         lastPosition = transform.position;
+    }
+
+    void FixedUpdate()
+    {
+        // SLAM INTEGRATION:
+        if (slamMapper != null)
+        {
+            // 1. Scan Surface (Terrain Form)
+            if (moonTerrain != null && moonTerrain.terrain != null)
+            {
+                slamMapper.ScanTerrainSurface(moonTerrain.terrain);
+            }
+
+            // 2. Navigation Update (Every 0.2s)
+            navTimer += Time.fixedDeltaTime;
+            if (navTimer > 0.2f)
+            {
+                navTimer = 0;
+                // Use EXPLORATION logic (Unknown Target) instead of Checkpoint logic (Known Target)
+                slamMapper.RecalculateExplorationPath(transform.position); 
+                nextPathPoint = slamMapper.GetNextPathPoint(transform.position);
+            }
+        }
     }
 
     public override void OnActionReceived(ActionBuffers actions)
@@ -215,31 +256,27 @@ public class MoonRoverAgent : Agent
 
         float currentDist = Vector3.Distance(transform.position, currentTarget.position);
         
-        // 1. IMPROVED PROGRESS REWARD / BACKTRACKING PENALTY
         if (currentDist < bestDistanceToTarget)
         {
             float progress = bestDistanceToTarget - currentDist;
-            AddReward(progress * 0.2f); // Reward for moving forward
+            AddReward(progress * 0.2f); 
             bestDistanceToTarget = currentDist;
         }
         else if (currentDist > bestDistanceToTarget + 0.2f)
         {
-            AddReward(backtrackingPenalty); // Penalty for moving backward from best point
+            AddReward(backtrackingPenalty); 
         }
 
-        // 2. DIRECTIONAL ALIGNMENT
         Vector3 toTarget = (currentTarget.position - transform.position).normalized;
         float alignment = Vector3.Dot(transform.forward, toTarget);
-        if (alignment < 0) AddReward(-0.01f); // Penalty for facing wrong way
+        if (alignment < 0) AddReward(-0.01f); 
 
-        // 3. ROAD ADHERENCE
         float pathDist = moonTerrain.GetDistanceFromPath(transform.position);
         if (pathDist > moonTerrain.pathWidth * 0.5f)
         {
             AddReward(-0.01f);
         }
 
-        // 4. TIP-OVER PROTECTION
         if (transform.up.y < 0.4f)
         {
             AddReward(-5.0f);
@@ -254,14 +291,15 @@ public class MoonRoverAgent : Agent
         if (Vector3.Distance(transform.position, currentTarget.position) < checkpointProximity)
         {
             bool isLast = (currentWaypointIndex >= moonTerrain.ActiveCheckpoints.Count - 1);
-            
-            // SCALED REWARDS: Each checkpoint is more valuable than the last
             float scaledReward = 2.0f + (currentWaypointIndex * 1.5f);
             
+            // SLAM Update: Record this as a key location!
+            if (slamMapper != null) slamMapper.AddKeyLocation(transform.position);
+
             if (isLast)
             {
-                AddReward(25.0f); // Massive finish line bonus
-                if (manager != null) manager.OnRoverReachedEnd(); // Signal the manager
+                AddReward(25.0f); 
+                if (manager != null) manager.OnRoverReachedEnd(); 
                 EndEpisode();
             }
             else

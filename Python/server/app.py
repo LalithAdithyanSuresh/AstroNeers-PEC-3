@@ -1,13 +1,17 @@
 from flask import Flask, render_template, request, redirect, jsonify
 import os
 import subprocess
+import glob
+import json
 
 app = Flask(__name__)
 
 # --- PATH CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Go up one level from 'server' to 'Python'
+# Go up one level from 'server' to 'Python' (Project Root)
 PYTHON_DIR = os.path.join(BASE_DIR, '..')
+# Assuming standard Unity structure where Assets is in the project root
+ASSETS_DIR = os.path.join(PYTHON_DIR, 'Assets')
 CONFIG_PATH = os.path.join(PYTHON_DIR, 'moon_rover_config.yaml')
 RESULTS_DIR = os.path.join(PYTHON_DIR, 'results')
 
@@ -64,6 +68,34 @@ def launch_tensorboard():
     cmd = 'start cmd /k "title TENSORBOARD && cd .. && tensorboard --logdir results --port 6006"'
     os.system(cmd)
     return jsonify({"status": "success", "message": "TensorBoard Launching..."})
+
+# --- NEW MAP VISUALIZATION ROUTES ---
+
+@app.route('/view_map')
+def view_map():
+    # Serves the NEW 3D viewer template
+    return render_template('map_viewer.html')
+
+@app.route('/get_latest_map')
+def get_latest_map():
+    # Pattern to match the files exported by Unity
+    search_pattern = os.path.join(ASSETS_DIR, "RoverMap_Gen*.json")
+    list_of_files = glob.glob(search_pattern)
+    
+    if not list_of_files:
+        return jsonify({"error": "No map files found in Assets directory."}), 404
+        
+    # Get the latest file based on modification time
+    latest_file = max(list_of_files, key=os.path.getctime)
+    
+    try:
+        with open(latest_file, 'r') as f:
+            data = json.load(f)
+        # Add metadata about the file
+        data['filename'] = os.path.basename(latest_file)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
