@@ -20,25 +20,25 @@ public class MoonRoverAgent : Agent
     public float maxSpeed = 10f;
     public TerrainGenerator moonTerrain;
     public float checkpointProximity = 5f;
-    public int episodeStepLimit = 5000;
+    public int episodeStepLimit = 5000; 
     public bool returnToHomeMode = false;
 
     [Header("3. Sensors")]
     public List<GameObject> lidarSensors;
     public LayerMask sensorVisibilityMask;
+    
     public YoloLandmarkDetector yoloDetector;
 
     [Header("4. LiDAR Settings")]
     public float lidarRayLength = 50f;
     public float lidarRayDegrees = 90f;
-    public int lidarRaysPerDirection = 5;
-    public float lidarSphereRadius = 0.2f;
-
-    // FIX: Restored these fields which are required by VoxelSlamMapper
+    [Tooltip("Reduced default for performance. 5 = 11 rays.")]
+    public int lidarRaysPerDirection = 5; 
     public float lidarVerticalDegrees = 30f;
     public int lidarVerticalRaysPerDirection = 2;
+    public float lidarSphereRadius = 0.2f;
 
-    [Header("5. Safety & Rewards")]
+    [Header("5. Safety & Performance")]
     public string obstacleTag = "Rocks";
     public float collisionPenalty = -10.0f;
     public float backtrackingPenalty = -0.05f;
@@ -51,8 +51,10 @@ public class MoonRoverAgent : Agent
     private float bestDistanceToTarget;
     // FIX: Removed unused 'currentPerformanceMetric'
     private GenerationManager manager;
-
-    public VoxelSlamMapper slamMapper { get; private set; }
+    
+    public VoxelSlamMapper slamMapper { get; private set; } 
+    
+    private float navTimer = 0;
     private Vector3 nextPathPoint = Vector3.zero;
 
     public override void Initialize()
@@ -61,11 +63,16 @@ public class MoonRoverAgent : Agent
         // FIX: Updated to FindFirstObjectByType (Unity 2023+)
         manager = FindFirstObjectByType<GenerationManager>();
         slamMapper = GetComponent<VoxelSlamMapper>();
-
+        
         if (yoloDetector == null) yoloDetector = GetComponent<YoloLandmarkDetector>();
-        // FIX: Updated to FindFirstObjectByType
-        if (moonTerrain == null) moonTerrain = FindFirstObjectByType<TerrainGenerator>();
+        
+        if (yoloDetector != null && yoloDetector.simCameras.Count == 0) 
+        {
+            yoloDetector.AutoAssignCameras();
+        }
 
+        if (moonTerrain == null) moonTerrain = FindObjectOfType<TerrainGenerator>();
+        
         MaxStep = episodeStepLimit;
         ConfigureSensors();
     }
@@ -84,6 +91,7 @@ public class MoonRoverAgent : Agent
         transform.position = pos;
         transform.rotation = rot;
         currentWaypointIndex = 0;
+        
         returnToHomeMode = false;
 
         if (moonTerrain && moonTerrain.ActiveCheckpoints.Count > 0)
@@ -91,16 +99,33 @@ public class MoonRoverAgent : Agent
             currentTarget = moonTerrain.ActiveCheckpoints[0];
             bestDistanceToTarget = Vector3.Distance(transform.position, currentTarget.position);
         }
+        EndEpisode(); 
+    }
 
-        // Manual reset logic for Eval mode to prevent double resets
-        if (manager != null && !manager.evaluationMode)
+    public void SetBodyMaterial(Material mat)
+    {
+        if (bodyRenderer != null && mat != null)
         {
-            EndEpisode();
+            bodyRenderer.material = mat;
         }
-        else
+    }
+
+    private void UpdateVisualPerformance()
+    {
+        if (bodyRenderer == null) return;
+        if (Time.frameCount % 5 != 0) return; // Optimization: Update visual less often
+        
+        if (returnToHomeMode)
         {
-            lastPosition = transform.position;
-            if (slamMapper) slamMapper.SetOrigin(pos);
+            bodyRenderer.material.color = Color.magenta;
+            return;
+        }
+        
+        float speedFactor = Mathf.Clamp01(rb.linearVelocity.magnitude / maxSpeed);
+        float alignment = 0;
+        if(currentTarget != null)
+        {
+            alignment = Mathf.Clamp01(Vector3.Dot(transform.forward, (currentTarget.position - transform.position).normalized));
         }
     }
 
@@ -120,9 +145,12 @@ public class MoonRoverAgent : Agent
         rb.linearVelocity = Vector3.zero;
         rb.angularVelocity = Vector3.zero;
         currentWaypointIndex = 0;
-        returnToHomeMode = false;
+        returnToHomeMode = false; 
 
-        if (slamMapper != null) slamMapper.SetOrigin(transform.position);
+        if (slamMapper != null)
+        {
+            slamMapper.SetOrigin(transform.position);
+        }
 
         if (moonTerrain != null && moonTerrain.ActiveCheckpoints.Count > 0)
         {
@@ -138,25 +166,78 @@ public class MoonRoverAgent : Agent
 
         Vector3 vectorToTarget = currentTarget.position - transform.position;
         Vector3 localTarget = transform.InverseTransformDirection(vectorToTarget);
-        sensor.AddObservation(localTarget.normalized);
-        sensor.AddObservation(Mathf.Clamp01(vectorToTarget.magnitude / 150f));
+        sensor.AddObservation(localTarget.normalized); 
+        sensor.AddObservation(Mathf.Clamp01(vectorToTarget.magnitude / 150f)); 
 
         Vector3 localVel = transform.InverseTransformDirection(rb.linearVelocity);
-        sensor.AddObservation(localVel / maxSpeed);
-        sensor.AddObservation(rb.angularVelocity.y);
+        sensor.AddObservation(localVel / maxSpeed); 
+        sensor.AddObservation(rb.angularVelocity.y); 
 
-        sensor.AddObservation(Vector3.Dot(transform.up, Vector3.up));
-        sensor.AddObservation(transform.InverseTransformDirection(transform.position - lastPosition));
-
+        sensor.AddObservation(Vector3.Dot(transform.up, Vector3.up)); 
+        sensor.AddObservation(transform.InverseTransformDirection(transform.position - lastPosition)); 
+        
         Vector3 navDir = Vector3.zero;
         if (slamMapper != null && nextPathPoint != Vector3.zero)
         {
             navDir = (nextPathPoint - transform.position).normalized;
             navDir = transform.InverseTransformDirection(navDir);
         }
-        sensor.AddObservation(navDir);
+        sensor.AddObservation(navDir); 
 
         lastPosition = transform.position;
+    }
+
+    void FixedUpdate()
+    {
+        if (slamMapper != null)
+        {
+            // Note: ScanTerrainSurface now has internal throttling in the Mapper
+            if (moonTerrain != null && moonTerrain.terrain != null)
+            {
+                slamMapper.ScanTerrainSurface(moonTerrain.terrain);
+            }
+
+            navTimer += Time.fixedDeltaTime;
+            if (navTimer > 0.2f)
+            {
+                navTimer = 0;
+                
+                if (returnToHomeMode)
+                    slamMapper.RecalculatePath(transform.position, slamMapper.originPosition);
+                else
+                    slamMapper.RecalculateExplorationPath(transform.position); 
+                
+                nextPathPoint = slamMapper.GetNextPathPoint(transform.position);
+            }
+        }
+
+        if (returnToHomeMode)
+        {
+            PerformReturnHomeLogic();
+        }
+    }
+
+    private void PerformReturnHomeLogic()
+    {
+        if (nextPathPoint == Vector3.zero) return;
+
+        Vector3 targetDir = (nextPathPoint - transform.position).normalized;
+        Vector3 localTarget = transform.InverseTransformDirection(targetDir);
+        
+        float steer = Mathf.Clamp(localTarget.x * 2.0f, -1f, 1f);
+        float motor = 0.5f; 
+
+        if (Mathf.Abs(steer) > 0.5f) motor = 0.2f;
+
+        ApplyPhysics(motor, steer);
+        SyncWheelVisuals();
+        UpdateVisualPerformance();
+        
+        if (Vector3.Distance(transform.position, slamMapper.originPosition) < 3.0f)
+        {
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+        }
     }
 
     public override void OnActionReceived(ActionBuffers actions)
@@ -234,7 +315,7 @@ public class MoonRoverAgent : Agent
         {
             bool isLast = (currentWaypointIndex >= moonTerrain.ActiveCheckpoints.Count - 1);
             float scaledReward = 2.0f + (currentWaypointIndex * 1.5f);
-
+            
             if (slamMapper != null) slamMapper.AddKeyLocation(transform.position);
 
             if (isLast)
@@ -265,7 +346,7 @@ public class MoonRoverAgent : Agent
 
     private void SyncWheelVisuals()
     {
-        if (Time.frameCount % 2 != 0) return;
+        if (Time.frameCount % 2 != 0) return; // Sync visuals every other frame
         for (int i = 0; i < wheels.Count; i++)
         {
             if (i >= wheelMeshes.Count) break;

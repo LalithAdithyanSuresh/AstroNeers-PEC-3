@@ -68,17 +68,15 @@ public class GenerationManager : MonoBehaviour
 
     // Diagnostics
     private float fps = 0;
+    private float maxHitchDetected = 0;
+    private float hitchTimer = 0;
     private bool isGpuMode = false;
 
     void Start()
     {
         RefreshAgentList();
+        // Check GPU Instancing support globally
         isGpuMode = SystemInfo.supportsInstancing;
-
-        if (evaluationMode)
-        {
-            StartNextTestRun();
-        }
     }
 
     void Update()
@@ -103,40 +101,19 @@ public class GenerationManager : MonoBehaviour
                 StartNewGeneration();
             }
 
-            // Leaderboard Logic (Training Only)
-            leaderboardTimer += dt;
-            if (leaderboardTimer >= 0.2f)
-            {
-                UpdateLeaderboard();
-                leaderboardTimer = 0;
-            }
-        }
-    }
-
-    public void OnRoverReachedEnd(MoonRoverAgent agent)
-    {
-        if (evaluationMode)
+        leaderboardTimer += dt;
+        if (leaderboardTimer >= (1f / leaderboardUpdateRate))
         {
-            RecordTestResult(RunResult.Success, agent);
+            UpdateLeaderboard();
+            leaderboardTimer = 0;
         }
-        else
-        {
-            pendingTerrainReset = true;
-            if (randomizeTerrainOnlyOnSuccess) StartNewGeneration();
-        }
+        
+        UpdateReturnToHomeState();
     }
-
-    public void OnRoverFailure(MoonRoverAgent agent, RunResult cause)
+    
+    private void UpdateReturnToHomeState()
     {
-        if (evaluationMode)
-        {
-            RecordTestResult(cause, agent);
-        }
-    }
-
-    private void StartNextTestRun()
-    {
-        if (currentTestIndex >= totalEvaluationRuns)
+        foreach(var agent in agents)
         {
             isEvaluationFinished = true;
             Debug.Log("<color=green>EVALUATION COMPLETE</color>");
@@ -238,6 +215,7 @@ public class GenerationManager : MonoBehaviour
     {
         generationCount++;
         timer = 0;
+        forceReturnToHome = false;
 
         bool shouldRegenTerrain = !randomizeTerrainOnlyOnSuccess || pendingTerrainReset;
 
@@ -288,65 +266,46 @@ public class GenerationManager : MonoBehaviour
 
     void OnGUI()
     {
-        if (evaluationMode) DrawEvaluationGUI();
-        else DrawTrainingGUI();
-    }
+        GUI.Box(new Rect(10, 10, 300, 320), "<b>ASTROBOT COMMAND</b>");
+        
+        GUIStyle style = new GUIStyle(GUI.skin.label);
+        style.normal.textColor = fps > 30 ? Color.green : Color.red;
+        GUI.Label(new Rect(25, 35, 250, 20), $"FPS: {fps:F1}", style);
 
-    void DrawEvaluationGUI()
-    {
-        GUI.Box(new Rect(10, 10, 450, 400), "<b>EVALUATION MODE</b>");
-        GUIStyle s = new GUIStyle(GUI.skin.label);
+        // MODE INDICATOR
+        GUIStyle modeStyle = new GUIStyle(GUI.skin.label);
+        modeStyle.normal.textColor = isGpuMode ? Color.cyan : Color.yellow;
+        string modeText = isGpuMode ? "GPU MODE (Instancing)" : "CPU MODE (GameObjects)";
+        GUI.Label(new Rect(120, 35, 180, 20), modeText, modeStyle);
 
-        GUI.Label(new Rect(25, 40, 400, 20), $"Run: {currentTestIndex} / {totalEvaluationRuns}");
-        GUI.Label(new Rect(25, 60, 400, 20), $"Time: {timer:F1}s / <color=yellow>{currentRunTimeLimit:F1}s</color>");
-        GUI.Label(new Rect(25, 80, 400, 20), $"Current Seed: {terrainGenerator.currentSeed}");
-
-        string paramsInfo = $"Size:{terrainGenerator.terrainSize:F0} Width:{terrainGenerator.pathWidth:F0} Curve:{terrainGenerator.pathCurvature:F0}";
-        GUI.Label(new Rect(25, 100, 400, 20), paramsInfo);
-
-        GUI.Label(new Rect(25, 130, 400, 20), "<b>Last 5 Results:</b>");
-
-        int start = Mathf.Max(0, testHistory.Count - 5);
-        for (int i = start; i < testHistory.Count; i++)
+        if (hitchTimer > 0)
         {
-            var r = testHistory[i];
-            string color = r.result == RunResult.Success ? "green" : (r.result == RunResult.Timeout ? "yellow" : "red");
-            string line = $"#{r.runIndex} | <color={color}>{r.result}</color> | Time: {r.timeTaken:F1}/{r.timeLimit:F0}s | Score: {r.score:F0}";
-            GUI.Label(new Rect(25, 150 + (i - start) * 20, 420, 20), line);
+            GUIStyle hitchStyle = new GUIStyle(GUI.skin.label);
+            hitchStyle.normal.textColor = Color.red;
+            hitchStyle.fontStyle = FontStyle.Bold;
+            GUI.Label(new Rect(25, 55, 250, 20), $"[ ! ] LAG SPIKE: {maxHitchDetected:F2}s", hitchStyle);
         }
 
-        if (testHistory.Count > 0)
-        {
-            float successRate = (float)testHistory.Count(x => x.result == RunResult.Success) / testHistory.Count * 100f;
-            float avgScore = testHistory.Average(x => x.score);
-            GUI.Label(new Rect(25, 270, 400, 20), $"<b>Success Rate: {successRate:F1}%</b>");
-            GUI.Label(new Rect(25, 290, 400, 20), $"Avg Score: {avgScore:F0}");
-        }
-
-        if (isEvaluationFinished)
-        {
-            GUI.Label(new Rect(25, 330, 400, 30), "<color=cyan>TESTING COMPLETE. CHECK CONSOLE FOR CSV.</color>");
-            if (GUI.Button(new Rect(25, 360, 150, 30), "RESTART EVAL"))
-            {
-                currentTestIndex = 0;
-                testHistory.Clear();
-                isEvaluationFinished = false;
-                StartNextTestRun();
-            }
-        }
-    }
-
-    void DrawTrainingGUI()
-    {
-        GUI.Box(new Rect(10, 10, 300, 320), "<b>TRAINING MODE</b>");
-        GUI.Label(new Rect(25, 35, 250, 20), $"FPS: {fps:F1}");
-        GUI.Label(new Rect(25, 60, 250, 20), $"Generation: {generationCount}");
-        GUI.Label(new Rect(25, 80, 250, 20), $"Next Reset: {(generationDuration - timer):F1}s");
-        GUI.Label(new Rect(25, 100, 250, 20), $"Best Score: {bestAllTimeScore:F0}");
-
+        GUI.Label(new Rect(25, 80, 250, 20), $"Generation: {generationCount}");
+        GUI.Label(new Rect(25, 100, 250, 20), $"Next Reset: {(generationDuration - timer):F1}s");
+        GUI.Label(new Rect(25, 120, 250, 20), $"Best Score: {bestAllTimeScore:F0}");
+        
         if (currentLeader != null)
-            GUI.Label(new Rect(25, 125, 250, 20), $"Leader: <color=yellow>{currentLeader.name}</color>");
+            GUI.Label(new Rect(25, 145, 250, 20), $"Leader: <color=yellow>{currentLeader.name}</color> ({currentLeader.GetCurrentCheckpoint()} CP)");
 
-        if (GUI.Button(new Rect(25, 160, 120, 25), "FORCE RESET")) StartNewGeneration();
+        string status = (randomizeTerrainOnlyOnSuccess && !pendingTerrainReset) ? "LOCKED" : "READY";
+        GUI.Label(new Rect(25, 170, 250, 20), $"Terrain Mode: {status}");
+
+        if (GUI.Button(new Rect(25, 200, 120, 25), "FORCE RESET")) StartNewGeneration();
+        if (GUI.Button(new Rect(155, 200, 120, 25), "RE-CACHE")) RefreshAgentList();
+        
+        forceReturnToHome = GUI.Toggle(new Rect(25, 235, 250, 25), forceReturnToHome, " ENABLE RETURN TO HOME");
+        
+        GUI.color = Color.cyan;
+        if (GUI.Button(new Rect(25, 270, 250, 30), "EXPORT BEST SLAM MAP"))
+        {
+            ExportBestRoverMap();
+        }
+        GUI.color = Color.white;
     }
 }
