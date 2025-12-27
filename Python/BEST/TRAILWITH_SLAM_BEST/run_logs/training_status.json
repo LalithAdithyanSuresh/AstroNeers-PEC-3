@@ -1,0 +1,38 @@
+{
+    "MoonRover": {
+        "checkpoints": [
+            {
+                "steps": 24770,
+                "file_path": "results\\TRAILWITH_SLAM_BEST\\MoonRover\\MoonRover-24770.onnx",
+                "reward": -20.234576456993818,
+                "creation_time": 1766746721.8160973,
+                "auxillary_file_paths": [
+                    "results\\TRAILWITH_SLAM_BEST\\MoonRover\\MoonRover-24770.pt"
+                ]
+            },
+            {
+                "steps": 346170,
+                "file_path": "results\\TRAILWITH_SLAM_BEST\\MoonRover\\MoonRover-346170.onnx",
+                "reward": 0.2572482294506497,
+                "creation_time": 1766751828.5105624,
+                "auxillary_file_paths": [
+                    "results\\TRAILWITH_SLAM_BEST\\MoonRover\\MoonRover-346170.pt"
+                ]
+            }
+        ],
+        "final_checkpoint": {
+            "steps": 346170,
+            "file_path": "results\\TRAILWITH_SLAM_BEST\\MoonRover.onnx",
+            "reward": 0.2572482294506497,
+            "creation_time": 1766751828.5105624,
+            "auxillary_file_paths": [
+                "results\\TRAILWITH_SLAM_BEST\\MoonRover\\MoonRover-346170.pt"
+            ]
+        }
+    },
+    "metadata": {
+        "stats_format_version": "0.3.0",
+        "mlagents_version": "1.1.0",
+        "torch_version": "2.2.2+cu121"
+    }
+}

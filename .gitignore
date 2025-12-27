@@ -14,6 +14,7 @@
 *.sln
 *.unitypackage
 *.userprefs
+Assets/_Recovery/*
 
 # --- Python & Environment ---
 venv/

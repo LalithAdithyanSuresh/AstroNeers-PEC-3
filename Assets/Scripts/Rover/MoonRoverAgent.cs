@@ -21,11 +21,15 @@ public class MoonRoverAgent : Agent
     public TerrainGenerator moonTerrain;
     public float checkpointProximity = 5f;
     public int episodeStepLimit = 5000; 
+    public bool returnToHomeMode = false; // Flag to override ML logic
 
     [Header("3. Telemetry & Sensors")]
     public List<GameObject> cameraSensors;
     public List<GameObject> lidarSensors;
     public LayerMask sensorVisibilityMask;
+    
+    // New YOLO Reference
+    public YoloLandmarkDetector yoloDetector;
 
     [Header("4. LiDAR Settings")]
     public float lidarRayLength = 50f;
@@ -61,6 +65,15 @@ public class MoonRoverAgent : Agent
         rb = GetComponent<Rigidbody>();
         manager = FindObjectOfType<GenerationManager>();
         slamMapper = GetComponent<VoxelSlamMapper>();
+        
+        // Auto-setup YOLO
+        if (yoloDetector == null) yoloDetector = GetComponent<YoloLandmarkDetector>();
+        
+        // FIX: Reference 'simCameras' instead of 'yoloCameras' to match the updated script
+        if (yoloDetector != null && yoloDetector.simCameras.Count == 0) 
+        {
+            yoloDetector.AutoAssignCameras();
+        }
 
         if (moonTerrain == null) moonTerrain = FindObjectOfType<TerrainGenerator>();
         
@@ -103,6 +116,10 @@ public class MoonRoverAgent : Agent
         transform.position = pos;
         transform.rotation = rot;
         currentWaypointIndex = 0;
+        
+        // Reset Logic
+        returnToHomeMode = false;
+        
         if (moonTerrain && moonTerrain.ActiveCheckpoints.Count > 0)
         {
             currentTarget = moonTerrain.ActiveCheckpoints[0];
@@ -122,6 +139,13 @@ public class MoonRoverAgent : Agent
     private void UpdateVisualPerformance()
     {
         if (bodyRenderer == null) return;
+        
+        // Override color if returning home
+        if (returnToHomeMode)
+        {
+            bodyRenderer.material.color = Color.magenta;
+            return;
+        }
         
         float speedFactor = Mathf.Clamp01(rb.linearVelocity.magnitude / maxSpeed);
         float alignment = 0;
@@ -156,6 +180,7 @@ public class MoonRoverAgent : Agent
         rb.linearVelocity = Vector3.zero;
         rb.angularVelocity = Vector3.zero;
         currentWaypointIndex = 0;
+        returnToHomeMode = false; // Always reset this at start of episode
 
         // Reset the SLAM Map and Set LOCALIZED ORIGIN
         if (slamMapper != null)
@@ -191,14 +216,12 @@ public class MoonRoverAgent : Agent
         sensor.AddObservation(Vector3.Dot(transform.up, Vector3.up)); // 1
         sensor.AddObservation(transform.InverseTransformDirection(transform.position - lastPosition)); // 3
         
-        // NEW: SLAM NAVIGATION HINT (3 Observations)
-        // Provides the direction to the FURTHEST EXPLORED POINT (Heuristic)
-        // This replaces the explicit "Checkpoint" navigation for the Neural Network's planning
+        // SLAM NAVIGATION HINT (3 Observations)
         Vector3 navDir = Vector3.zero;
         if (slamMapper != null && nextPathPoint != Vector3.zero)
         {
             navDir = (nextPathPoint - transform.position).normalized;
-            navDir = transform.InverseTransformDirection(navDir); // Local space
+            navDir = transform.InverseTransformDirection(navDir); 
         }
         sensor.AddObservation(navDir); // 3
 
@@ -210,7 +233,7 @@ public class MoonRoverAgent : Agent
         // SLAM INTEGRATION:
         if (slamMapper != null)
         {
-            // 1. Scan Surface (Terrain Form)
+            // 1. Scan Surface
             if (moonTerrain != null && moonTerrain.terrain != null)
             {
                 slamMapper.ScanTerrainSurface(moonTerrain.terrain);
@@ -221,15 +244,62 @@ public class MoonRoverAgent : Agent
             if (navTimer > 0.2f)
             {
                 navTimer = 0;
-                // Use EXPLORATION logic (Unknown Target) instead of Checkpoint logic (Known Target)
-                slamMapper.RecalculateExplorationPath(transform.position); 
+                
+                if (returnToHomeMode)
+                {
+                    // RTH Logic: Target is Origin
+                    slamMapper.RecalculatePath(transform.position, slamMapper.originPosition);
+                }
+                else
+                {
+                    // Normal Logic: Exploration
+                    slamMapper.RecalculateExplorationPath(transform.position); 
+                }
+                
                 nextPathPoint = slamMapper.GetNextPathPoint(transform.position);
             }
+        }
+
+        // AUTO-PILOT FOR RETURN TO HOME
+        // We override the Neural Network if Return Home is active
+        if (returnToHomeMode)
+        {
+            PerformReturnHomeLogic();
+        }
+    }
+
+    // Explicit PID controller to drive home
+    private void PerformReturnHomeLogic()
+    {
+        if (nextPathPoint == Vector3.zero) return;
+
+        Vector3 targetDir = (nextPathPoint - transform.position).normalized;
+        Vector3 localTarget = transform.InverseTransformDirection(targetDir);
+        
+        float steer = Mathf.Clamp(localTarget.x * 2.0f, -1f, 1f);
+        float motor = 0.5f; // Constant gentle speed
+
+        // If sharp turn, slow down
+        if (Mathf.Abs(steer) > 0.5f) motor = 0.2f;
+
+        // Apply
+        ApplyPhysics(motor, steer);
+        SyncWheelVisuals();
+        UpdateVisualPerformance();
+        
+        // Stop if home
+        if (Vector3.Distance(transform.position, slamMapper.originPosition) < 3.0f)
+        {
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
         }
     }
 
     public override void OnActionReceived(ActionBuffers actions)
     {
+        // If returning home, ignore NN actions
+        if (returnToHomeMode) return;
+
         ApplyPhysics(actions.ContinuousActions[0], actions.ContinuousActions[1]);
         SyncWheelVisuals();
         CheckCheckpointLogic();

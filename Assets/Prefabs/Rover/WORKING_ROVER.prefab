@@ -1268,6 +1268,9 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: f4e785f9988eb4e45adf5a43ed4ae004, type: 3}
       insertIndex: -1
       addedObject: {fileID: -7972970382868364484}
+    - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: f4e785f9988eb4e45adf5a43ed4ae004, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 8947180397943727072}
   m_SourcePrefab: {fileID: 100100000, guid: f4e785f9988eb4e45adf5a43ed4ae004, type: 3}
 --- !u!4 &2276941552139867590 stripped
 Transform:
@@ -1417,6 +1420,7 @@ MonoBehaviour:
   moonTerrain: {fileID: 0}
   checkpointProximity: 4
   episodeStepLimit: 5000
+  returnToHomeMode: 0
   cameraSensors:
   - {fileID: 5994096295604855532}
   - {fileID: 5595052456290778357}
@@ -1430,6 +1434,7 @@ MonoBehaviour:
   sensorVisibilityMask:
     serializedVersion: 2
     m_Bits: 119
+  yoloDetector: {fileID: 0}
   lidarRayLength: 45
   lidarRayDegrees: 197.4
   lidarRaysPerDirection: 8
@@ -1455,14 +1460,43 @@ MonoBehaviour:
   showTrajectory: 1
   showCalculatedPath: 1
   showExplorationTarget: 1
+  showLandmarks: 1
   useRealGameObjects: 1
   granularity: 1
-  obstacleMaterial: {fileID: 0}
-  visitedGroundMaterial: {fileID: 0}
-  voxelPrefab: {fileID: 0}
+  obstacleMaterial: {fileID: 2100000, guid: b9473885e31ce2140a5462ee6b64978b, type: 2}
+  visitedGroundMaterial: {fileID: 2100000, guid: 543f7638c9eacc34abcce0d8580af3fd, type: 2}
+  landmarkMaterial: {fileID: 2100000, guid: 39129924ffb9cbb43a84ebd65726d058, type: 2}
+  voxelPrefab: {fileID: 5461473359228290206, guid: 2ba51fa6af0284242bf13b95d0c60894, type: 3}
   mapLayer: 10
   obstacleMask:
     serializedVersion: 2
     m_Bits: 513
   verticalScanAngle: 15
   maxPathIterations: 1000
+--- !u!114 &8947180397943727072
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 9060758427166635637}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2276c45bc1904a0468c0c25f8b3f2d7c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::YoloLandmarkDetector
+  useRealInference: 0
+  inferenceCamera: {fileID: 0}
+  depthRayRadius: 0.2
+  detectionRange: 15
+  detectionRate: 0.5
+  detectionMask:
+    serializedVersion: 2
+    m_Bits: 119
+  simCameras:
+  - {fileID: 4777085232533197650}
+  - {fileID: 7070267321893762061}
+  - {fileID: 2197397797962869321}
+  - {fileID: 6827928534789905175}
+  - {fileID: 8641421252464858825}
+  slamMapper: {fileID: -7972970382868364484}

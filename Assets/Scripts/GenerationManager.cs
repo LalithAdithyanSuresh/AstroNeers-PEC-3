@@ -28,6 +28,9 @@ public class GenerationManager : MonoBehaviour
     private List<MoonRoverAgent> agents = new List<MoonRoverAgent>();
     private float bestAllTimeScore = 0;
     private MoonRoverAgent currentLeader;
+    
+    // --- NEW: RETURN TO HOME ---
+    private bool forceReturnToHome = false;
 
     // Advanced Diagnostics
     private float fps = 0;
@@ -42,16 +45,15 @@ public class GenerationManager : MonoBehaviour
 
     void Update()
     {
-        // We use unscaledDeltaTime to ensure the UI and timer stay 1:1 with your wall clock
         float dt = Time.unscaledDeltaTime;
         timer += dt;
 
         // FPS & Hitch Detection
         fps = Mathf.Lerp(fps, 1.0f / dt, 0.05f);
-        if (dt > 0.1f && timer > 1f) // If a frame takes longer than 100ms
+        if (dt > 0.1f && timer > 1f) 
         {
             maxHitchDetected = dt;
-            hitchTimer = 5f; // Show the warning for 5 seconds
+            hitchTimer = 5f; 
         }
         if (hitchTimer > 0) hitchTimer -= dt;
 
@@ -65,6 +67,21 @@ public class GenerationManager : MonoBehaviour
         {
             UpdateLeaderboard();
             leaderboardTimer = 0;
+        }
+        
+        // Sync RTH State
+        UpdateReturnToHomeState();
+    }
+    
+    private void UpdateReturnToHomeState()
+    {
+        // Propagate the RTH toggle to all agents
+        foreach(var agent in agents)
+        {
+            if (agent != null && agent.returnToHomeMode != forceReturnToHome)
+            {
+                agent.returnToHomeMode = forceReturnToHome;
+            }
         }
     }
 
@@ -103,12 +120,13 @@ public class GenerationManager : MonoBehaviour
     {
         generationCount++;
         timer = 0;
+        forceReturnToHome = false; // Reset RTH on new generation
 
         bool shouldRegenTerrain = !randomizeTerrainOnlyOnSuccess || pendingTerrainReset;
 
         if (shouldRegenTerrain && terrainGenerator != null)
         {
-            System.GC.Collect(); // Clear memory before heavy generation
+            System.GC.Collect(); 
             terrainGenerator.RegenerateTerrainOnly();
             pendingTerrainReset = false; 
         }
@@ -145,7 +163,7 @@ public class GenerationManager : MonoBehaviour
 
     void OnGUI()
     {
-        GUI.Box(new Rect(10, 10, 300, 260), "<b>ASTROBOT COMMAND</b>");
+        GUI.Box(new Rect(10, 10, 300, 300), "<b>ASTROBOT COMMAND</b>");
         
         // FPS Meter
         GUIStyle style = new GUIStyle(GUI.skin.label);
@@ -162,7 +180,7 @@ public class GenerationManager : MonoBehaviour
         }
 
         GUI.Label(new Rect(25, 60, 250, 20), $"Generation: {generationCount}");
-        GUI.Label(new Rect(25, 80, 250, 20), $"Next Reset: {(generationDuration - timer):F1}s (Wall Clock)");
+        GUI.Label(new Rect(25, 80, 250, 20), $"Next Reset: {(generationDuration - timer):F1}s");
         GUI.Label(new Rect(25, 100, 250, 20), $"Best Score: {bestAllTimeScore:F0}");
         
         if (currentLeader != null)
@@ -175,9 +193,12 @@ public class GenerationManager : MonoBehaviour
         if (GUI.Button(new Rect(25, 180, 120, 25), "FORCE RESET")) StartNewGeneration();
         if (GUI.Button(new Rect(155, 180, 120, 25), "RE-CACHE")) RefreshAgentList();
         
-        // --- NEW EXPORT BUTTON ---
+        // --- NEW RETURN TO HOME TOGGLE ---
+        forceReturnToHome = GUI.Toggle(new Rect(25, 215, 250, 25), forceReturnToHome, " ENABLE RETURN TO HOME");
+        
+        // --- EXPORT BUTTON ---
         GUI.color = Color.cyan;
-        if (GUI.Button(new Rect(25, 220, 250, 30), "EXPORT BEST SLAM MAP"))
+        if (GUI.Button(new Rect(25, 250, 250, 30), "EXPORT BEST SLAM MAP"))
         {
             ExportBestRoverMap();
         }

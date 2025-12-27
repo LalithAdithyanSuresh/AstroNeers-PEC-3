@@ -11,6 +11,7 @@ public class VoxelSlamMapper : MonoBehaviour
     public bool showTrajectory = true;
     public bool showCalculatedPath = true;
     public bool showExplorationTarget = true;
+    public bool showLandmarks = true;
 
     [Header("Mode Selection")]
     public bool useRealGameObjects = true; 
@@ -19,6 +20,7 @@ public class VoxelSlamMapper : MonoBehaviour
     public float granularity = 0.5f; 
     public Material obstacleMaterial; 
     public Material visitedGroundMaterial; 
+    public Material landmarkMaterial; // Material for YOLO Landmarks
     
     [Header("CPU Mode Settings")]
     public GameObject voxelPrefab; 
@@ -35,7 +37,7 @@ public class VoxelSlamMapper : MonoBehaviour
     public int maxPathIterations = 2000; 
     
     // --- SLAM DATA ---
-    private Vector3 originPosition; 
+    public Vector3 originPosition { get; private set; }
     
     // Exploration Heuristic Data
     private float maxDistanceFromOrigin = 0f;
@@ -43,6 +45,8 @@ public class VoxelSlamMapper : MonoBehaviour
 
     private HashSet<Vector3Int> occupiedVoxels = new HashSet<Vector3Int>(); 
     private HashSet<Vector3Int> visitedGroundVoxels = new HashSet<Vector3Int>(); 
+    private HashSet<Vector3Int> landmarkVoxels = new HashSet<Vector3Int>(); // Store Landmarks
+    
     private List<Vector3> trajectory = new List<Vector3>();
     private List<Vector3> keyLocations = new List<Vector3>(); 
     
@@ -55,6 +59,9 @@ public class VoxelSlamMapper : MonoBehaviour
     
     private List<Matrix4x4[]> groundBatches = new List<Matrix4x4[]>();
     private List<Matrix4x4> currentGroundBatch = new List<Matrix4x4>();
+
+    private List<Matrix4x4[]> landmarkBatches = new List<Matrix4x4[]>();
+    private List<Matrix4x4> currentLandmarkBatch = new List<Matrix4x4>();
 
     // CPU Storage
     private Transform mapContainer;
@@ -70,6 +77,7 @@ public class VoxelSlamMapper : MonoBehaviour
         public List<Vector3> obstacles;
         public List<Vector3> safeGround;
         public List<Vector3> keyLocations;
+        public List<Vector3> landmarks; // Added export support
         public float finalScore;
     }
 
@@ -84,6 +92,7 @@ public class VoxelSlamMapper : MonoBehaviour
 
         if (obstacleMaterial) obstacleMaterial.enableInstancing = true;
         if (visitedGroundMaterial) visitedGroundMaterial.enableInstancing = true;
+        if (landmarkMaterial) landmarkMaterial.enableInstancing = true;
     }
 
     private void InitializeContainer()
@@ -107,6 +116,7 @@ public class VoxelSlamMapper : MonoBehaviour
         {
             RenderGPU(obstacleBatches, currentObstacleBatch, obstacleMaterial);
             RenderGPU(groundBatches, currentGroundBatch, visitedGroundMaterial);
+            RenderGPU(landmarkBatches, currentLandmarkBatch, landmarkMaterial);
         }
     }
 
@@ -121,6 +131,7 @@ public class VoxelSlamMapper : MonoBehaviour
     {
         occupiedVoxels.Clear();
         visitedGroundVoxels.Clear();
+        landmarkVoxels.Clear();
         trajectory.Clear();
         keyLocations.Clear();
         currentCalculatedPath.Clear();
@@ -133,6 +144,8 @@ public class VoxelSlamMapper : MonoBehaviour
         currentObstacleBatch.Clear();
         groundBatches.Clear();
         currentGroundBatch.Clear();
+        landmarkBatches.Clear();
+        currentLandmarkBatch.Clear();
 
         if (mapContainer != null)
         {
@@ -143,6 +156,25 @@ public class VoxelSlamMapper : MonoBehaviour
     public void AddKeyLocation(Vector3 pos)
     {
         keyLocations.Add(pos);
+    }
+
+    // --- YOLO INTERFACE ---
+    public void RegisterLandmark(Vector3 pos, string label)
+    {
+        // Snap to grid
+        int x = Mathf.FloorToInt(pos.x / granularity);
+        int y = Mathf.FloorToInt(pos.y / granularity);
+        int z = Mathf.FloorToInt(pos.z / granularity);
+        Vector3Int coord = new Vector3Int(x, y, z);
+
+        if (!landmarkVoxels.Contains(coord))
+        {
+            landmarkVoxels.Add(coord);
+            Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
+
+            if (useRealGameObjects) SpawnBlock(centerPos, 2); // 2 = Landmark
+            else AddToRenderBatch(Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity), currentLandmarkBatch, landmarkBatches);
+        }
     }
 
     private void UpdateTrajectory()
@@ -183,7 +215,8 @@ public class VoxelSlamMapper : MonoBehaviour
     {
         if (currentCalculatedPath == null || currentCalculatedPath.Count == 0) return Vector3.zero;
 
-        while(currentCalculatedPath.Count > 0 && Vector3.Distance(currentPos, currentCalculatedPath[0]) < 2.0f)
+        // Consume path points as we get close to them
+        while(currentCalculatedPath.Count > 0 && Vector3.Distance(currentPos, currentCalculatedPath[0]) < 2.5f)
         {
             currentCalculatedPath.RemoveAt(0);
         }
@@ -194,20 +227,19 @@ public class VoxelSlamMapper : MonoBehaviour
 
     /// <summary>
     /// Calculates a path to the FURTHEST KNOWN SAFE POINT from the origin.
-    /// This acts as a heuristic to "Find the End Flag" by constantly expanding boundaries.
     /// </summary>
     public void RecalculateExplorationPath(Vector3 startPos)
     {
         if (visitedGroundVoxels.Count == 0) return;
         if (furthestVoxel == Vector3Int.zero) return;
 
-        // Our target is simply the furthest point we have ever mapped
         Vector3 targetPos = GridToWorld(furthestVoxel);
-        
-        // Use A* to find the best route through verified ground to get there
         currentCalculatedPath = FindPathAStar(startPos, targetPos);
     }
 
+    /// <summary>
+    /// Standard A* Pathfinding to a specific target
+    /// </summary>
     public void RecalculatePath(Vector3 startPos, Vector3 targetPos)
     {
         currentCalculatedPath = FindPathAStar(startPos, targetPos);
@@ -218,6 +250,7 @@ public class VoxelSlamMapper : MonoBehaviour
         Vector3Int startNode = WorldToGrid(start);
         Vector3Int targetNode = WorldToGrid(end);
 
+        // If start/end aren't perfectly on visited nodes, find the closest valid ones
         if (!visitedGroundVoxels.Contains(startNode)) startNode = FindClosestVisited(startNode);
         if (!visitedGroundVoxels.Contains(targetNode)) targetNode = FindClosestVisited(targetNode);
         
@@ -241,17 +274,13 @@ public class VoxelSlamMapper : MonoBehaviour
         {
             if (iterations++ > maxPathIterations) break;
 
+            // Get node with lowest F score
             Vector3Int current = openSet[0];
             float lowestF = fScore.ContainsKey(current) ? fScore[current] : float.MaxValue;
-
             for (int i = 1; i < openSet.Count; i++)
             {
                 float f = fScore.ContainsKey(openSet[i]) ? fScore[openSet[i]] : float.MaxValue;
-                if (f < lowestF)
-                {
-                    current = openSet[i];
-                    lowestF = f;
-                }
+                if (f < lowestF) { current = openSet[i]; lowestF = f; }
             }
 
             if (current == targetNode) return ReconstructPath(cameFrom, current);
@@ -262,8 +291,8 @@ public class VoxelSlamMapper : MonoBehaviour
             foreach (Vector3Int neighbor in GetNeighbors(current))
             {
                 if (closedSet.Contains(neighbor)) continue;
-                if (occupiedVoxels.Contains(neighbor)) continue; 
-                if (!visitedGroundVoxels.Contains(neighbor)) continue; 
+                if (occupiedVoxels.Contains(neighbor)) continue; // Avoid obstacles
+                if (!visitedGroundVoxels.Contains(neighbor)) continue; // Only walk on visited ground
 
                 float tentativeG = gScore[current] + Vector3.Distance(GridToWorld(current), GridToWorld(neighbor));
 
@@ -299,7 +328,7 @@ public class VoxelSlamMapper : MonoBehaviour
             for (int z = -1; z <= 1; z++)
             {
                 if (x == 0 && z == 0) continue;
-                for (int y = -1; y <= 1; y++) 
+                for (int y = -1; y <= 1; y++) // Small vertical steps allowed
                     yield return center + new Vector3Int(x, y, z);
             }
         }
@@ -373,7 +402,7 @@ public class VoxelSlamMapper : MonoBehaviour
             targetSet.Add(coord);
             Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
 
-            if (useRealGameObjects) SpawnBlock(centerPos, isObstacle);
+            if (useRealGameObjects) SpawnBlock(centerPos, isObstacle ? 1 : 0);
             else AddToRenderBatch(Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity), isObstacle ? currentObstacleBatch : currentGroundBatch, isObstacle ? obstacleBatches : groundBatches);
         
             // --- EXPLORATION HEURISTIC UPDATE ---
@@ -390,7 +419,8 @@ public class VoxelSlamMapper : MonoBehaviour
         }
     }
 
-    private void SpawnBlock(Vector3 pos, bool isObstacle)
+    // type: 0 = Safe, 1 = Obstacle, 2 = Landmark
+    private void SpawnBlock(Vector3 pos, int type)
     {
         InitializeContainer();
         GameObject block;
@@ -400,7 +430,10 @@ public class VoxelSlamMapper : MonoBehaviour
         block.transform.localScale = Vector3.one * granularity;
         block.layer = mapLayer; 
         
-        Material matToUse = isObstacle ? obstacleMaterial : visitedGroundMaterial;
+        Material matToUse = visitedGroundMaterial; // Default
+        if (type == 1) matToUse = obstacleMaterial;
+        if (type == 2) matToUse = landmarkMaterial;
+
         if (matToUse != null) { var rend = block.GetComponent<Renderer>(); if (rend) rend.material = matToUse; }
         
         Collider col = block.GetComponent<Collider>();
@@ -430,6 +463,7 @@ public class VoxelSlamMapper : MonoBehaviour
         
         data.obstacles = occupiedVoxels.Select(v => new Vector3(v.x, v.y, v.z) * granularity).ToList();
         data.safeGround = visitedGroundVoxels.Select(v => new Vector3(v.x, v.y, v.z) * granularity).ToList();
+        data.landmarks = landmarkVoxels.Select(v => new Vector3(v.x, v.y, v.z) * granularity).ToList();
         data.trajectory = new List<Vector3>(trajectory);
         data.keyLocations = new List<Vector3>(keyLocations);
 
@@ -449,6 +483,10 @@ public class VoxelSlamMapper : MonoBehaviour
             Gizmos.color = Color.red;
             Gizmos.DrawWireSphere(GridToWorld(furthestVoxel), 1.0f);
         }
+        
+        // Show Origin
+        Gizmos.color = Color.blue;
+        Gizmos.DrawSphere(originPosition, 0.5f);
     }
 
     private void OnDrawGizmosSelected()
