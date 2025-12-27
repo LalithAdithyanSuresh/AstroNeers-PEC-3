@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LunaBot Vision Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #0f0c29;
+            --card-bg: rgba(48, 43, 99, 0.4);
+            --accent: #bb86fc; /* Purple Accent */
+            --text-main: #ffffff;
+            --text-secondary: #b3b3b3;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        /* --- Header & Stats --- */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: var(--card-bg);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+
+        h1 { margin: 0; font-weight: 300; letter-spacing: 2px; }
+        
+        .stat-box {
+            text-align: right;
+        }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-number {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 0 0 10px var(--accent);
+        }
+
+        /* --- Camera Grid --- */
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+
+        .camera-card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            transition: transform 0.3s ease;
+        }
+
+        .camera-card:hover {
+            transform: translateY(-5px);
+            border-color: var(--accent);
+        }
+
+        .cam-header {
+            padding: 10px 15px;
+            background: rgba(0, 0, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .cam-title {
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .live-badge {
+            background-color: #ff0055;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: bold;
+            animation: pulse 1.5s infinite;
+        }
+
+        /* The Image Stream */
+        .video-feed {
+            width: 100%;
+            height: auto;
+            display: block;
+            min-height: 300px;
+            background-color: #000;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        /* Footer */
+        .footer {
+            margin-top: 40px;
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header Section -->
+    <div class="header">
+        <div>
+            <h1>LUNABOT <span style="color:var(--accent)">VISION</span></h1>
+            <div style="font-size: 0.9rem; color: var(--text-secondary);">Multi-Camera Hazard Detection System</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Total Rocks Identified</div>
+            <div class="stat-number" id="rockCount">0</div>
+        </div>
+    </div>
+
+    <!-- Camera Grid -->
+    <div class="grid-container">
+        <!-- Camera 0 -->
+        <div class="camera-card">
+            <div class="cam-header">
+                <span class="cam-title">CAM 01 - FRONT LEFT</span>
+                <span class="live-badge">LIVE</span>
+            </div>
+            <img src="/video_feed/0" class="video-feed" alt="Camera 0 Feed">
+        </div>
+
+        <!-- Camera 1 -->
+        <div class="camera-card">
+            <div class="cam-header">
+                <span class="cam-title">CAM 02 - FRONT RIGHT</span>
+                <span class="live-badge">LIVE</span>
+            </div>
+            <img src="/video_feed/1" class="video-feed" alt="Camera 1 Feed">
+        </div>
+
+        <!-- Camera 2 -->
+        <div class="camera-card">
+            <div class="cam-header">
+                <span class="cam-title">CAM 03 - REAR</span>
+                <span class="live-badge">LIVE</span>
+            </div>
+            <img src="/video_feed/2" class="video-feed" alt="Camera 2 Feed">
+        </div>
+
+        <!-- Camera 3 -->
+        <div class="camera-card">
+            <div class="cam-header">
+                <span class="cam-title">CAM 04 - SIDE LEFT</span>
+                <span class="live-badge">LIVE</span>
+            </div>
+            <img src="/video_feed/3" class="video-feed" alt="Camera 3 Feed">
+        </div>
+
+        <!-- Camera 4 -->
+        <div class="camera-card">
+            <div class="cam-header">
+                <span class="cam-title">CAM 05 - SIDE RIGHT</span>
+                <span class="live-badge">LIVE</span>
+            </div>
+            <img src="/video_feed/4" class="video-feed" alt="Camera 4 Feed">
+        </div>
+    </div>
+
+    <div class="footer">
+        ASTRO-NEER PROJECT | SYSTEM STATUS: ONLINE | PORT: 8000
+    </div>
+
+    <!-- Script to update rock count -->
+    <script>
+        function updateStats() {
+            fetch('/stats')
+                .then(response => response.json())
+                .then(data => {
+                    const counter = document.getElementById('rockCount');
+                    // Simple animation effect
+                    const currentVal = parseInt(counter.innerText);
+                    const newVal = data.total_rocks;
+                    
+                    if (newVal > currentVal) {
+                        counter.style.transform = "scale(1.2)";
+                        setTimeout(() => counter.style.transform = "scale(1)", 200);
+                    }
+                    counter.innerText = newVal;
+                })
+                .catch(err => console.error('Error fetching stats:', err));
+        }
+
+        // Poll stats every 1 second
+        setInterval(updateStats, 1000);
+    </script>
+
+</body>
+</html>
