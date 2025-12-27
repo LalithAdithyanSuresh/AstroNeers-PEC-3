@@ -1,6 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System.Linq; 
+using System.Linq;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -25,87 +25,94 @@ public class TerrainGenerator : MonoBehaviour
     public float pathLength = 400f;
     public float pathWidth = 30f;
     public float pathFlattenStrength = 15f;
-    public float pathCurvature = 50f; 
+    public float pathCurvature = 50f;
 
     [Header("4. Checkpoints & Visuals")]
     public GameObject checkpointPrefab;
     public int checkpointCount = 20;
     public float checkpointWidthMultiplier = 1.2f;
-    public float checkpointHeight = 8.0f; 
+    public float checkpointHeight = 8.0f;
     public float lineWidth = 0.5f;
-    public float lineHoverHeight = 2.0f; 
+    public float lineHoverHeight = 2.0f;
     public Color safeLineColor = new Color(0, 1, 1, 0.5f);
-    
+
     [Header("5. Spawning")]
     public bool spawnObjects = true;
     public List<GameObject> rockPrefabs;
     public int rockCount = 500;
     public float rockEmbedDepth = 0.5f;
-    
-    [Tooltip("Standard Safety: How much wider than the path should the safe zone be? (e.g. 1.8)")]
-    [Range(1.0f, 3.0f)] public float rockPathBuffer = 1.8f; 
 
-    [Tooltip("Probability (0-1) that a rock can ignore the strict buffer and spawn closer to the edge.")]
-    [Range(0f, 1f)] public float rockOverflowChance = 0.15f; 
+    [Tooltip("Standard Safety: How much wider than the path should the safe zone be?")]
+    [Range(1.0f, 3.0f)] public float rockPathBuffer = 1.8f;
 
-    [Tooltip("Overflow Safety: If overflowing, how much closer can it get? (e.g. 1.1 = almost touching edge)")]
+    [Tooltip("Probability (0-1) that a rock can ignore the strict buffer.")]
+    [Range(0f, 1f)] public float rockOverflowChance = 0.15f;
+
+    [Tooltip("Overflow Safety: If overflowing, how much closer can it get?")]
     [Range(1.0f, 2.0f)] public float rockOverflowBuffer = 1.1f;
 
-    public string rockTag = "Rocks"; 
-    
+    public string rockTag = "Rocks";
+
     [Space(10)]
     public GameObject startFlagPrefab;
     public GameObject endFlagPrefab;
-    
+
     [Space(10)]
     public GameObject roverPrefab;
     public int roverSpawnCount = 10;
 
     [Header("6. Layer Management")]
-    [Tooltip("Layer name for spawned Rovers (to hide them from sensors).")]
     public string roverLayerName = "Rovers";
-    [Tooltip("Layer name for Checkpoints (to hide them).")]
     public string checkpointLayerName = "Checkpoints";
-    [Tooltip("Layer name for Flags/Markers (to hide them).")]
     public string markerLayerName = "Markers";
-    [Tooltip("Layer name for Safe Lines (to hide them).")]
     public string safeLineLayerName = "Markers";
 
     // --- Internal State ---
-    private Vector2 p0, p1, p2, p3; 
-    private List<Vector2> pathSegments = new List<Vector2>(); 
-    
+    private Vector2 p0, p1, p2, p3;
+    private List<Vector2> pathSegments = new List<Vector2>();
+
     // Containers
     private Transform propContainer;
     private Transform visualContainer;
     private LineRenderer leftLine, rightLine;
-    
-    // API
+
     public List<Transform> ActiveCheckpoints { get; private set; } = new List<Transform>();
+
+    // --- HELPER FOR TESTING ---
+    public void SetGenerationParameters(float size, float width, float curvature, float noise, int rocks)
+    {
+        this.terrainSize = size;
+        this.pathWidth = width;
+        this.pathCurvature = curvature;
+        this.noiseScale = noise;
+        this.rockCount = rocks;
+        this.pathLength = size * 0.85f;
+    }
 
     private void Awake()
     {
-        if (Application.isPlaying) 
+        if (Application.isPlaying)
         {
-            CleanupAll(); 
+            CleanupAll();
             Generate(true);
         }
     }
 
     private void OnApplicationQuit()
     {
-        CleanupAll(); 
+        CleanupAll();
     }
 
     // ==================================================================================
-    // PUBLIC API (Required by MoonRoverAgent)
+    // PUBLIC API
     // ==================================================================================
 
     public Vector3 GetStartPosition()
     {
         if (terrain == null) return transform.position;
         Vector3 worldPos = GetWorldPos(p0);
-        worldPos.y = terrain.SampleHeight(worldPos) + terrain.transform.position.y + 0.5f;
+        // Lifted slightly higher (+1.0f) to prevent wheel clipping on spawn
+        worldPos.y = terrain.SampleHeight(worldPos) + terrain.transform.position.y + 1.0f;
         return worldPos;
     }
 
@@ -114,7 +121,7 @@ public class TerrainGenerator : MonoBehaviour
         Vector3 start = GetWorldPos(p0);
         Vector3 next = GetWorldPos(p1);
         Vector3 dir = (next - start).normalized;
-        dir.y = 0; 
+        dir.y = 0;
         if (dir == Vector3.zero) return Quaternion.identity;
         return Quaternion.LookRotation(dir);
     }
@@ -135,18 +142,16 @@ public class TerrainGenerator : MonoBehaviour
 
     public void RegenerateTerrainOnly()
     {
-        // Use Unity Random here to pick a NEW seed for the next generation
         currentSeed = Random.Range(0, 999999);
         CleanupEnvironmentOnly();
-        
-        // From this point on, use the seeded PRNG
+
         System.Random prng = new System.Random(currentSeed);
         SetupTerrainData();
-        CalculateBezierPath(prng);
+        CalculateBezierPath(prng); // Now includes S-Curve logic
         ApplyHeightmap(prng);
         GeneratePathVisualsAndCheckpoints();
         SpawnRocksAndFlags(prng);
-        
+
         Debug.Log($"<color=yellow>Terrain Regenerated</color> Seed: {currentSeed}");
     }
 
@@ -154,7 +159,7 @@ public class TerrainGenerator : MonoBehaviour
     {
         if (terrain == null) return;
 
-        CleanupAll(); 
+        CleanupAll();
         System.Random prng = new System.Random(currentSeed);
 
         SetupTerrainData();
@@ -170,7 +175,7 @@ public class TerrainGenerator : MonoBehaviour
     }
 
     // ==================================================================================
-    // INTERNAL LOGIC
+    // INTERNAL LOGIC (UPDATED FOR S-CURVES)
     // ==================================================================================
 
     private void CalculateBezierPath(System.Random prng)
@@ -181,24 +186,38 @@ public class TerrainGenerator : MonoBehaviour
         float margin = Mathf.Max((terrainSize - actualLen) / 2f / terrainSize, safetyBuffer);
         float center = 0.5f;
 
+        // 1. Determine Start (p0) and End (p3) positions
         float z0 = Mathf.Clamp(center + (float)(prng.NextDouble() * 0.2 - 0.1), safetyBuffer, 1f - safetyBuffer);
         p0 = new Vector2(margin, z0);
 
         float z3 = Mathf.Clamp(center + (float)(prng.NextDouble() * 0.2 - 0.1), safetyBuffer, 1f - safetyBuffer);
         p3 = new Vector2(1f - margin, z3);
 
+        // 2. Determine Curve Shape
         float curve = pathCurvature / terrainSize;
-        bool up = prng.Next(0, 2) == 0;
-        float dir = up ? 1f : -1f;
+
+        // 50% Chance to be an "S" Shape (Snake), 50% "C" Shape (Arc)
+        bool isSCurve = prng.Next(0, 2) == 0;
+
+        // Base Direction: Up (1) or Down (-1)
+        float primaryDir = (prng.Next(0, 2) == 0) ? 1f : -1f;
 
         float x1 = Mathf.Lerp(p0.x, p3.x, 0.33f);
         float x2 = Mathf.Lerp(p0.x, p3.x, 0.66f);
-        float z1 = Mathf.Clamp(p0.y + (dir * curve), safetyBuffer, 1f - safetyBuffer);
-        float z2 = Mathf.Clamp(p3.y + (dir * curve), safetyBuffer, 1f - safetyBuffer);
+
+        // Control Point 1 (p1): Always follows primary direction
+        float z1 = Mathf.Clamp(p0.y + (primaryDir * curve), safetyBuffer, 1f - safetyBuffer);
+
+        // Control Point 2 (p2):
+        // If "C" Shape, it follows the same direction.
+        // If "S" Shape, it flips to the opposite direction.
+        float secondaryDir = isSCurve ? -primaryDir : primaryDir;
+        float z2 = Mathf.Clamp(p3.y + (secondaryDir * curve), safetyBuffer, 1f - safetyBuffer);
 
         p1 = new Vector2(x1, z1);
         p2 = new Vector2(x2, z2);
 
+        // 3. Generate Segments
         pathSegments.Clear();
         for (int i = 0; i <= 100; i++)
             pathSegments.Add(CalculateBezierPoint(i / 100f));
@@ -208,8 +227,8 @@ public class TerrainGenerator : MonoBehaviour
     {
         Vector3 startPos = GetWorldPos(p0);
         Vector3 startDir = (GetWorldPos(p1) - startPos).normalized; startDir.y = 0;
-        
-        if(startFlagPrefab) 
+
+        if (startFlagPrefab)
         {
             GameObject flag = Instantiate(startFlagPrefab, startPos, Quaternion.LookRotation(startDir), propContainer);
             flag.name = "StartFlag";
@@ -218,8 +237,8 @@ public class TerrainGenerator : MonoBehaviour
 
         Vector3 endPos = GetWorldPos(p3);
         Vector3 endDir = (endPos - GetWorldPos(p2)).normalized; endDir.y = 0;
-        
-        if(endFlagPrefab) 
+
+        if (endFlagPrefab)
         {
             GameObject flag = Instantiate(endFlagPrefab, endPos, Quaternion.LookRotation(endDir), propContainer);
             flag.name = "EndFlag";
@@ -238,7 +257,7 @@ public class TerrainGenerator : MonoBehaviour
 
                 float dist = GetClosestDistanceToPath(new Vector2(u, v));
                 float currentBuffer = strictDistNormalized;
-                
+
                 if (prng.NextDouble() < rockOverflowChance)
                 {
                     currentBuffer = overflowDistNormalized;
@@ -251,12 +270,12 @@ public class TerrainGenerator : MonoBehaviour
 
                 GameObject prefab = rockPrefabs[prng.Next(rockPrefabs.Count)];
                 GameObject rock = Instantiate(prefab, pos, Quaternion.Euler(0, (float)prng.NextDouble() * 360f, 0), propContainer);
-                
+
                 rock.transform.localScale = Vector3.one * Mathf.Lerp(0.5f, 2.0f, (float)prng.NextDouble());
-                
-                if (rock.tag == "Untagged") 
+
+                if (rock.tag == "Untagged")
                 {
-                    try { rock.tag = rockTag; } catch {}
+                    try { rock.tag = rockTag; } catch { }
                 }
             }
         }
@@ -265,7 +284,7 @@ public class TerrainGenerator : MonoBehaviour
     private void SpawnRovers(System.Random prng)
     {
         if (!roverPrefab || roverSpawnCount <= 0) return;
-        
+
         GameObject pool = new GameObject("Rover_Pool");
         Vector3 startPos = GetWorldPos(p0);
         Quaternion startRot = GetStartRotation();
@@ -278,8 +297,6 @@ public class TerrainGenerator : MonoBehaviour
             AssignLayer(r, roverLayerName);
         }
     }
-
-    // --- Helpers ---
 
     private void AssignLayer(GameObject obj, string layerName)
     {
@@ -300,17 +317,15 @@ public class TerrainGenerator : MonoBehaviour
         }
     }
 
-    private void CleanupAll() 
-    { 
-        CleanupEnvironmentOnly(); 
-        CleanupRovers(); 
+    private void CleanupAll()
+    {
+        CleanupEnvironmentOnly();
+        CleanupRovers();
     }
 
     private void SafeDestroy(GameObject obj)
     {
         if (obj == null) return;
-        if (!obj) return; 
-
         if (Application.isPlaying) Destroy(obj);
         else DestroyImmediate(obj);
     }
@@ -318,7 +333,7 @@ public class TerrainGenerator : MonoBehaviour
     private void DestroyByName(string name)
     {
         var allObjects = Resources.FindObjectsOfTypeAll<GameObject>()
-            .Where(obj => obj.name == name && obj.scene.IsValid()) 
+            .Where(obj => obj.name == name && obj.scene.IsValid())
             .ToList();
 
         foreach (var obj in allObjects)
@@ -348,9 +363,9 @@ public class TerrainGenerator : MonoBehaviour
         propContainer.parent = transform;
         visualContainer = new GameObject("Visuals_Container").transform;
         visualContainer.parent = transform;
-        
+
         ActiveCheckpoints.Clear();
-        
+
         leftLine = CreateLine("LeftBoundary");
         rightLine = CreateLine("RightBoundary");
     }
@@ -364,8 +379,6 @@ public class TerrainGenerator : MonoBehaviour
     {
         GameObject obj = new GameObject(name);
         obj.transform.parent = visualContainer;
-        
-        // ASSIGN THE SAFE LINE LAYER
         AssignLayer(obj, safeLineLayerName);
 
         LineRenderer lr = obj.AddComponent<LineRenderer>();
@@ -389,11 +402,11 @@ public class TerrainGenerator : MonoBehaviour
     private void GeneratePathVisualsAndCheckpoints()
     {
         ActiveCheckpoints.Clear();
-        
+
         List<Vector3> leftPts = new List<Vector3>();
         List<Vector3> rightPts = new List<Vector3>();
-        
-        int lineSteps = 200; 
+
+        int lineSteps = 200;
         for (int i = 0; i <= lineSteps; i++)
         {
             float t = i / (float)lineSteps;
@@ -404,10 +417,10 @@ public class TerrainGenerator : MonoBehaviour
 
             Vector2 pLeft = p + normal * halfWidth;
             Vector2 pRight = p - normal * halfWidth;
-            
+
             Vector3 wL = GetWorldPos(new Vector2(Mathf.Clamp01(pLeft.x), Mathf.Clamp01(pLeft.y)));
             Vector3 wR = GetWorldPos(new Vector2(Mathf.Clamp01(pRight.x), Mathf.Clamp01(pRight.y)));
-            
+
             leftPts.Add(wL + Vector3.up * lineHoverHeight);
             rightPts.Add(wR + Vector3.up * lineHoverHeight);
         }
@@ -422,18 +435,16 @@ public class TerrainGenerator : MonoBehaviour
                 Vector2 p = CalculateBezierPoint(t);
                 Vector2 tangent = CalculateBezierTangent(t).normalized;
                 Vector3 pos = GetWorldPos(p);
-                
+
                 GameObject cp = Instantiate(checkpointPrefab, pos, Quaternion.identity, visualContainer);
                 cp.name = $"Checkpoint_{i}";
                 Vector3 tan3D = new Vector3(tangent.x, 0, tangent.y);
                 if (tan3D != Vector3.zero) cp.transform.rotation = Quaternion.LookRotation(tan3D);
-                
+
                 Vector3 s = cp.transform.localScale;
                 s.x = pathWidth * checkpointWidthMultiplier;
-                s.y = checkpointHeight; 
+                s.y = checkpointHeight;
                 cp.transform.localScale = s;
-
-                // Assign Layer
                 AssignLayer(cp, checkpointLayerName);
 
                 Collider col = cp.GetComponent<Collider>();
@@ -458,7 +469,7 @@ public class TerrainGenerator : MonoBehaviour
         float[,] heights = new float[res, res];
         float offsetX = prng.Next(-10000, 10000);
         float offsetY = prng.Next(-10000, 10000);
-        
+
         float pathRadius = (pathWidth / terrainSize) * 0.5f;
         float falloff = ((pathWidth + pathFlattenStrength) / terrainSize) * 0.5f;
 
@@ -480,7 +491,7 @@ public class TerrainGenerator : MonoBehaviour
     public Vector3 GetWorldPos(Vector2 norm) => new Vector3(norm.x * terrainSize, terrain.transform.position.y, norm.y * terrainSize) + terrain.transform.position + new Vector3(0, terrain.SampleHeight(new Vector3(norm.x * terrainSize, 0, norm.y * terrainSize) + terrain.transform.position), 0);
     private Vector2 CalculateBezierPoint(float t) { float u = 1 - t; return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3; }
     private Vector2 CalculateBezierTangent(float t) { float u = 1 - t; return 3 * u * u * (p1 - p0) + 6 * u * t * (p2 - p1) + 3 * t * t * (p3 - p2); }
-    private float GetClosestDistanceToPath(Vector2 p) { float m = float.MaxValue; for(int i=0;i<pathSegments.Count-1;i++) m=Mathf.Min(m, DistanceToSegment(p, pathSegments[i], pathSegments[i+1])); return m; }
+    private float GetClosestDistanceToPath(Vector2 p) { float m = float.MaxValue; for (int i = 0; i < pathSegments.Count - 1; i++) m = Mathf.Min(m, DistanceToSegment(p, pathSegments[i], pathSegments[i + 1])); return m; }
     private float DistanceToSegment(Vector2 p, Vector2 a, Vector2 b) { Vector2 pa = p - a, ba = b - a; float h = Mathf.Clamp01(Vector2.Dot(pa, ba) / Vector2.Dot(ba, ba)); return (pa - h * ba).magnitude; }
 
     void OnValidate()
