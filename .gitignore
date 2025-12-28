@@ -22,6 +22,7 @@ venv/
 __pycache__/
 *.py[cod]
 *$py.class
+.vscode/
 
 # --- AstroBOT Specifics ---
 # Ignore the ML results/training data but keep the code
