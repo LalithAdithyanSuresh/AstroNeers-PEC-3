@@ -7,7 +7,7 @@ using System.Linq;
 public class VoxelSlamMapper : MonoBehaviour
 {
     [Header("Debug Visualization")]
-    public bool showLidarGizmos = false; // Default off for FPS
+    public bool showLidarGizmos = false;
     public bool showTrajectory = true;
     public bool showCalculatedPath = true;
     public bool showExplorationTarget = true;
@@ -29,9 +29,16 @@ public class VoxelSlamMapper : MonoBehaviour
     public Material visitedGroundMaterial; 
     public Material landmarkMaterial; 
     
+    [Header("Landmark Visualization")]
+    [Tooltip("Mesh to use for Landmarks (e.g., Sphere). Defaults to Cube if null.")]
+    public Mesh landmarkMesh; 
+    [Tooltip("Multiplier for the size of landmarks relative to grid granularity.")]
+    public float landmarkScaleMultiplier = 2.0f; 
+
     [Header("Fallback Settings")]
     public GameObject voxelPrefab; 
-    
+    public GameObject landmarkPrefab; // Prefab for "Real GameObject" mode
+
     [Header("Layer Settings")]
     public int mapLayer = 9; 
     public LayerMask obstacleMask; 
@@ -41,12 +48,11 @@ public class VoxelSlamMapper : MonoBehaviour
     public float verticalScanAngle = 15f; 
 
     [Header("Pathfinding")]
-    public int maxPathIterations = 500; // Reduced from 2000 for speed
+    public int maxPathIterations = 500; 
     
     // --- SLAM DATA ---
     public Vector3 originPosition { get; private set; }
     
-    // Exploration Heuristic Data
     private float maxDistanceFromOrigin = 0f;
     private Vector3Int furthestVoxel = Vector3Int.zero;
 
@@ -57,7 +63,6 @@ public class VoxelSlamMapper : MonoBehaviour
     private List<Vector3> trajectory = new List<Vector3>();
     private List<Vector3> keyLocations = new List<Vector3>(); 
     
-    // Navigation Data
     private List<Vector3> currentCalculatedPath = new List<Vector3>();
 
     // GPU Instancing Storage
@@ -92,7 +97,6 @@ public class VoxelSlamMapper : MonoBehaviour
     {
         if (autoDetectGPU)
         {
-            // Check for GPU Instancing Support
             if (SystemInfo.supportsInstancing)
             {
                 useRealGameObjects = false;
@@ -111,11 +115,19 @@ public class VoxelSlamMapper : MonoBehaviour
         agent = GetComponent<MoonRoverAgent>();
         InitializeContainer();
         
+        // Default Cube Mesh
         GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
         cubeMesh = temp.GetComponent<MeshFilter>().sharedMesh;
         Destroy(temp);
 
-        // Ensure materials support instancing
+        // Default Landmark Mesh if not assigned
+        if (landmarkMesh == null)
+        {
+             GameObject tempSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+             landmarkMesh = tempSphere.GetComponent<MeshFilter>().sharedMesh;
+             Destroy(tempSphere);
+        }
+
         if (obstacleMaterial) obstacleMaterial.enableInstancing = true;
         if (visitedGroundMaterial) visitedGroundMaterial.enableInstancing = true;
         if (landmarkMaterial) landmarkMaterial.enableInstancing = true;
@@ -142,12 +154,14 @@ public class VoxelSlamMapper : MonoBehaviour
 
     void Update()
     {
-        // GPU Rendering happens every frame for smoothness, but logic is throttled
         if (!useRealGameObjects)
         {
-            RenderGPU(obstacleBatches, currentObstacleBatch, obstacleMaterial);
-            RenderGPU(groundBatches, currentGroundBatch, visitedGroundMaterial);
-            RenderGPU(landmarkBatches, currentLandmarkBatch, landmarkMaterial);
+            // Render Obstacles & Ground (Standard Cube)
+            RenderGPU(obstacleBatches, currentObstacleBatch, obstacleMaterial, cubeMesh);
+            RenderGPU(groundBatches, currentGroundBatch, visitedGroundMaterial, cubeMesh);
+            
+            // Render Landmarks (Custom Mesh & Logic)
+            RenderGPU(landmarkBatches, currentLandmarkBatch, landmarkMaterial, landmarkMesh);
         }
     }
 
@@ -188,6 +202,9 @@ public class VoxelSlamMapper : MonoBehaviour
         keyLocations.Add(pos);
     }
 
+    // ==================================================================================
+    // LANDMARK REGISTRATION (Updated)
+    // ==================================================================================
     public void RegisterLandmark(Vector3 pos, string label)
     {
         int x = Mathf.FloorToInt(pos.x / granularity);
@@ -198,10 +215,19 @@ public class VoxelSlamMapper : MonoBehaviour
         if (!landmarkVoxels.Contains(coord))
         {
             landmarkVoxels.Add(coord);
+            // Center the visual exactly on the grid
             Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
 
-            if (useRealGameObjects) SpawnBlock(centerPos, 2);
-            else AddToRenderBatch(Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity), currentLandmarkBatch, landmarkBatches);
+            if (useRealGameObjects) 
+            {
+                SpawnBlock(centerPos, 2); // 2 = Landmark Type
+            }
+            else 
+            {
+                // Scale is multiplied here for the matrix
+                Matrix4x4 mat = Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity * landmarkScaleMultiplier);
+                AddToRenderBatch(mat, currentLandmarkBatch, landmarkBatches);
+            }
         }
     }
 
@@ -215,7 +241,6 @@ public class VoxelSlamMapper : MonoBehaviour
 
     public void ScanTerrainSurface(Terrain terrain)
     {
-        // PERFORMANCE: Throttled to match Lidar
         if (Time.frameCount % scanThrottleFrames != 0) return;
 
         if (terrain == null) return;
@@ -239,15 +264,158 @@ public class VoxelSlamMapper : MonoBehaviour
     }
 
     // ==================================================================================
-    // PATHFINDING
+    // LIDAR & CORE (Updated for Landmark Identification)
+    // ==================================================================================
+
+    private void Perform3DLidarScan()
+    {
+        if (agent == null || agent.lidarSensors == null) return;
+        float maxDist = agent.lidarRayLength;
+        float hAngleTotal = agent.lidarRayDegrees;
+        int hRays = (agent.lidarRaysPerDirection * 2) + 1;
+        float hStep = hRays > 1 ? (hAngleTotal * 2) / (hRays - 1) : 0;
+        
+        float vAngleTotal = verticalScanAngle;
+        int vRays = (agent.lidarVerticalRaysPerDirection * 2) + 1;
+        float vStep = vRays > 1 ? (vAngleTotal * 2) / (vRays - 1) : 0;
+
+        foreach (var sensorObj in agent.lidarSensors)
+        {
+            if (!sensorObj) continue;
+            Vector3 origin = sensorObj.transform.position;
+            Quaternion rot = sensorObj.transform.rotation;
+            
+            for (int v = 0; v < vRays; v++)
+            {
+                float vAngle = -vAngleTotal + (v * vStep);
+                Quaternion vRot = Quaternion.AngleAxis(vAngle, Vector3.right); 
+                for (int h = 0; h < hRays; h++)
+                {
+                    float hAngle = -hAngleTotal + (h * hStep);
+                    Quaternion hRot = Quaternion.AngleAxis(hAngle, Vector3.up);
+                    Vector3 dir = rot * hRot * vRot * Vector3.forward;
+                    
+                    if (Physics.Raycast(origin, dir, out RaycastHit hit, maxDist, obstacleMask))
+                    {
+                        // --- IDENTIFICATION LOGIC ---
+                        // "Cheat" using Tags to identify if this voxel is a specific landmark
+                        if (hit.collider.CompareTag(agent.obstacleTag))
+                        {
+                            RegisterLandmark(hit.point, "Rock");
+                        }
+                        else
+                        {
+                            // Standard Obstacle (e.g., Walls, Debris)
+                            RegisterVoxel(hit.point, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void RegisterVoxel(Vector3 pos, bool isObstacle)
+    {
+        int x = Mathf.FloorToInt(pos.x / granularity);
+        int y = Mathf.FloorToInt(pos.y / granularity);
+        int z = Mathf.FloorToInt(pos.z / granularity);
+        Vector3Int coord = new Vector3Int(x, y, z);
+
+        HashSet<Vector3Int> targetSet = isObstacle ? occupiedVoxels : visitedGroundVoxels;
+        if (isObstacle && visitedGroundVoxels.Contains(coord)) return; 
+        if (!isObstacle && occupiedVoxels.Contains(coord)) return;
+
+        // Don't overwrite existing landmarks with generic obstacles
+        if (landmarkVoxels.Contains(coord)) return;
+
+        if (!targetSet.Contains(coord))
+        {
+            targetSet.Add(coord);
+            Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
+
+            if (useRealGameObjects) 
+            {
+                SpawnBlock(centerPos, isObstacle ? 1 : 0);
+            }
+            else 
+            {
+                // GPU INSTANCING
+                Matrix4x4 mat = Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity);
+                if (isObstacle) AddToRenderBatch(mat, currentObstacleBatch, obstacleBatches);
+                else AddToRenderBatch(mat, currentGroundBatch, groundBatches);
+            }
+        
+            if (!isObstacle)
+            {
+                float distSq = (pos - originPosition).sqrMagnitude;
+                if (distSq > maxDistanceFromOrigin)
+                {
+                    maxDistanceFromOrigin = distSq;
+                    furthestVoxel = coord;
+                }
+            }
+        }
+    }
+
+    // type: 0 = Safe, 1 = Obstacle, 2 = Landmark
+    private void SpawnBlock(Vector3 pos, int type)
+    {
+        InitializeContainer();
+        GameObject block;
+        
+        // Handle custom prefabs
+        if (type == 2 && landmarkPrefab != null) block = Instantiate(landmarkPrefab, pos, Quaternion.identity, mapContainer);
+        else if (voxelPrefab != null) block = Instantiate(voxelPrefab, pos, Quaternion.identity, mapContainer);
+        else 
+        { 
+            // Primitives
+            PrimitiveType pType = (type == 2) ? PrimitiveType.Sphere : PrimitiveType.Cube;
+            block = GameObject.CreatePrimitive(pType); 
+            block.transform.position = pos; 
+            block.transform.parent = mapContainer; 
+        }
+        
+        // Scale logic
+        float scale = granularity;
+        if (type == 2) scale *= landmarkScaleMultiplier;
+        
+        block.transform.localScale = Vector3.one * scale;
+        block.layer = mapLayer; 
+        
+        Material matToUse = visitedGroundMaterial; // Default
+        if (type == 1) matToUse = obstacleMaterial;
+        if (type == 2) matToUse = landmarkMaterial;
+
+        if (matToUse != null) { var rend = block.GetComponent<Renderer>(); if (rend) rend.material = matToUse; }
+        
+        Collider col = block.GetComponent<Collider>();
+        if (col) Destroy(col);
+        block.SetActive(true);
+    }
+
+    private void AddToRenderBatch(Matrix4x4 mat, List<Matrix4x4> currentList, List<Matrix4x4[]> batchList)
+    {
+        currentList.Add(mat);
+        if (currentList.Count >= 1023) { batchList.Add(currentList.ToArray()); currentList.Clear(); }
+    }
+
+    // Updated RenderGPU to accept specific Mesh
+    private void RenderGPU(List<Matrix4x4[]> batches, List<Matrix4x4> current, Material mat, Mesh meshToDraw)
+    {
+        if (mat == null || meshToDraw == null) return;
+        foreach (var batch in batches) Graphics.DrawMeshInstanced(meshToDraw, 0, mat, batch, batch.Length, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, mapLayer);
+        if (current.Count > 0) Graphics.DrawMeshInstanced(meshToDraw, 0, mat, current, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, mapLayer);
+    }
+
+    // ==================================================================================
+    // PATHFINDING & UTILS
     // ==================================================================================
 
     public Vector3 GetNextPathPoint(Vector3 currentPos)
     {
         if (currentCalculatedPath == null || currentCalculatedPath.Count == 0) return Vector3.zero;
 
-        // Optimized cleanup using SqrMagnitude
-        while(currentCalculatedPath.Count > 0 && (currentPos - currentCalculatedPath[0]).sqrMagnitude < 6.25f) // 2.5*2.5
+        while(currentCalculatedPath.Count > 0 && (currentPos - currentCalculatedPath[0]).sqrMagnitude < 6.25f) 
         {
             currentCalculatedPath.RemoveAt(0);
         }
@@ -281,7 +449,7 @@ public class VoxelSlamMapper : MonoBehaviour
         HashSet<Vector3Int> closedSet = new HashSet<Vector3Int>();
         Dictionary<Vector3Int, Vector3Int> cameFrom = new Dictionary<Vector3Int, Vector3Int>();
         Dictionary<Vector3Int, float> gScore = new Dictionary<Vector3Int, float>();
-        List<Vector3Int> openSet = new List<Vector3Int>(); // Consider PriorityQueue for bigger maps
+        List<Vector3Int> openSet = new List<Vector3Int>(); 
         
         openSet.Add(startNode);
         gScore[startNode] = 0;
@@ -293,9 +461,8 @@ public class VoxelSlamMapper : MonoBehaviour
 
         while (openSet.Count > 0)
         {
-            if (iterations++ > maxPathIterations) break; // Hard limit for FPS protection
+            if (iterations++ > maxPathIterations) break; 
 
-            // Optimized sort: Only sorting the small OpenSet is okay, but could be better
             openSet.Sort((a, b) => {
                 float fa = fScore.ContainsKey(a) ? fScore[a] : float.MaxValue;
                 float fb = fScore.ContainsKey(b) ? fScore[b] : float.MaxValue;
@@ -313,6 +480,8 @@ public class VoxelSlamMapper : MonoBehaviour
             {
                 if (closedSet.Contains(neighbor)) continue;
                 if (occupiedVoxels.Contains(neighbor)) continue; 
+                // Treat Landmarks as obstacles for navigation
+                if (landmarkVoxels.Contains(neighbor)) continue;
                 if (!visitedGroundVoxels.Contains(neighbor)) continue; 
 
                 float tentativeG = gScore[current] + 1.0f; 
@@ -364,119 +533,6 @@ public class VoxelSlamMapper : MonoBehaviour
 
     private Vector3Int WorldToGrid(Vector3 pos) => new Vector3Int(Mathf.FloorToInt(pos.x / granularity), Mathf.FloorToInt(pos.y / granularity), Mathf.FloorToInt(pos.z / granularity));
     private Vector3 GridToWorld(Vector3Int grid) => new Vector3(grid.x * granularity + (granularity * 0.5f), grid.y * granularity + (granularity * 0.5f), grid.z * granularity + (granularity * 0.5f));
-
-    // ==================================================================================
-    // LIDAR & CORE
-    // ==================================================================================
-
-    private void Perform3DLidarScan()
-    {
-        if (agent == null || agent.lidarSensors == null) return;
-        float maxDist = agent.lidarRayLength;
-        float hAngleTotal = agent.lidarRayDegrees;
-        int hRays = (agent.lidarRaysPerDirection * 2) + 1;
-        float hStep = hRays > 1 ? (hAngleTotal * 2) / (hRays - 1) : 0;
-        
-        float vAngleTotal = verticalScanAngle;
-        int vRays = (agent.lidarVerticalRaysPerDirection * 2) + 1;
-        float vStep = vRays > 1 ? (vAngleTotal * 2) / (vRays - 1) : 0;
-
-        foreach (var sensorObj in agent.lidarSensors)
-        {
-            if (!sensorObj) continue;
-            Vector3 origin = sensorObj.transform.position;
-            Quaternion rot = sensorObj.transform.rotation;
-            
-            for (int v = 0; v < vRays; v++)
-            {
-                float vAngle = -vAngleTotal + (v * vStep);
-                Quaternion vRot = Quaternion.AngleAxis(vAngle, Vector3.right); 
-                for (int h = 0; h < hRays; h++)
-                {
-                    float hAngle = -hAngleTotal + (h * hStep);
-                    Quaternion hRot = Quaternion.AngleAxis(hAngle, Vector3.up);
-                    Vector3 dir = rot * hRot * vRot * Vector3.forward;
-                    if (Physics.Raycast(origin, dir, out RaycastHit hit, maxDist, obstacleMask))
-                        RegisterVoxel(hit.point, true);
-                }
-            }
-        }
-    }
-
-    private void RegisterVoxel(Vector3 pos, bool isObstacle)
-    {
-        int x = Mathf.FloorToInt(pos.x / granularity);
-        int y = Mathf.FloorToInt(pos.y / granularity);
-        int z = Mathf.FloorToInt(pos.z / granularity);
-        Vector3Int coord = new Vector3Int(x, y, z);
-
-        HashSet<Vector3Int> targetSet = isObstacle ? occupiedVoxels : visitedGroundVoxels;
-        if (isObstacle && visitedGroundVoxels.Contains(coord)) return; 
-        if (!isObstacle && occupiedVoxels.Contains(coord)) return;
-
-        if (!targetSet.Contains(coord))
-        {
-            targetSet.Add(coord);
-            Vector3 centerPos = new Vector3(x, y, z) * granularity + (Vector3.one * (granularity * 0.5f));
-
-            if (useRealGameObjects) 
-            {
-                SpawnBlock(centerPos, isObstacle ? 1 : 0);
-            }
-            else 
-            {
-                // GPU INSTANCING
-                Matrix4x4 mat = Matrix4x4.TRS(centerPos, Quaternion.identity, Vector3.one * granularity);
-                if (isObstacle) AddToRenderBatch(mat, currentObstacleBatch, obstacleBatches);
-                else AddToRenderBatch(mat, currentGroundBatch, groundBatches);
-            }
-        
-            if (!isObstacle)
-            {
-                float distSq = (pos - originPosition).sqrMagnitude;
-                if (distSq > maxDistanceFromOrigin)
-                {
-                    maxDistanceFromOrigin = distSq;
-                    furthestVoxel = coord;
-                }
-            }
-        }
-    }
-
-    // type: 0 = Safe, 1 = Obstacle, 2 = Landmark
-    private void SpawnBlock(Vector3 pos, int type)
-    {
-        InitializeContainer();
-        GameObject block;
-        if (voxelPrefab != null) block = Instantiate(voxelPrefab, pos, Quaternion.identity, mapContainer);
-        else { block = GameObject.CreatePrimitive(PrimitiveType.Cube); block.transform.position = pos; block.transform.parent = mapContainer; }
-        
-        block.transform.localScale = Vector3.one * granularity;
-        block.layer = mapLayer; 
-        
-        Material matToUse = visitedGroundMaterial; // Default
-        if (type == 1) matToUse = obstacleMaterial;
-        if (type == 2) matToUse = landmarkMaterial;
-
-        if (matToUse != null) { var rend = block.GetComponent<Renderer>(); if (rend) rend.material = matToUse; }
-        
-        Collider col = block.GetComponent<Collider>();
-        if (col) Destroy(col);
-        block.SetActive(true);
-    }
-
-    private void AddToRenderBatch(Matrix4x4 mat, List<Matrix4x4> currentList, List<Matrix4x4[]> batchList)
-    {
-        currentList.Add(mat);
-        if (currentList.Count >= 1023) { batchList.Add(currentList.ToArray()); currentList.Clear(); }
-    }
-
-    private void RenderGPU(List<Matrix4x4[]> batches, List<Matrix4x4> current, Material mat)
-    {
-        if (mat == null || cubeMesh == null) return;
-        foreach (var batch in batches) Graphics.DrawMeshInstanced(cubeMesh, 0, mat, batch, batch.Length, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, mapLayer);
-        if (current.Count > 0) Graphics.DrawMeshInstanced(cubeMesh, 0, mat, current, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, mapLayer);
-    }
 
     public string GetSerializationData()
     {
